@@ -45,10 +45,10 @@ enum Light: Int, Comparable {
 
     var label: String {
         switch self {
-        case .working:   return L("正在执行", "working")
-        case .attention: return L("等待你确认", "needs you")
-        case .done:      return L("已完成", "done")
-        case .idle:      return L("空闲", "idle")
+        case .working:   return L("执行中", "Working")
+        case .attention: return L("待确认", "Needs you")
+        case .done:      return L("已完成", "Done")
+        case .idle:      return L("空闲", "Idle")
         }
     }
 }
@@ -505,7 +505,7 @@ final class PanelModel: ObservableObject {
     }
 }
 
-let panelWidth: CGFloat = 420
+let panelWidth: CGFloat = 360
 
 struct PanelView: View {
     @ObservedObject var model: PanelModel
@@ -518,6 +518,24 @@ struct PanelView: View {
     }
 }
 
+// a labelled on/off button: filled when on
+struct ChipToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            configuration.label
+                .font(.system(size: 12))
+                .foregroundColor(configuration.isOn ? .white : Color(nsColor: .tertiaryLabelColor))
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 7)
+                    .fill(configuration.isOn ? Color.accentColor : Color.clear))
+                .overlay(RoundedRectangle(cornerRadius: 7)
+                    .stroke(configuration.isOn ? Color.accentColor : Color.primary.opacity(0.18), lineWidth: 0.5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct PanelContent: View {
     @ObservedObject var model: PanelModel
     let styles: [GlowStyle]
@@ -527,215 +545,162 @@ struct PanelContent: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            states.padding(.horizontal, 16).padding(.vertical, 12)
+            section(L("状态提示", "Status lights")) {
+                ForEach(styles, id: \.onKey) { stateRow($0).padding(.vertical, 6) }
+            }
             Divider()
-            keyboard.padding(.horizontal, 16).padding(.vertical, 12)
+            keyboard
             Divider()
-            agents.padding(.horizontal, 16).padding(.vertical, 12)
+            agents
             Divider()
             HStack {
-                Toggle(L("开机时自动打开", "Open at login"),
+                Toggle(L("开机自动启动", "Open at login"),
                        isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(.switch).controlSize(.mini)
                 Spacer()
-                Button(L("退出 Agent Lumen", "Quit Agent Lumen")) { model.perform(.quit) }
-                    .keyboardShortcut("q").controlSize(.small)
+                Button(L("退出", "Quit")) { model.perform(.quit) }
+                    .buttonStyle(.plain).keyboardShortcut("q")
             }
+            .font(.system(size: 12)).foregroundColor(.secondary)
             .padding(.horizontal, 16).padding(.vertical, 10)
         }
         .font(.system(size: 13))
         .frame(width: panelWidth)
     }
 
-    private func caption(_ text: String) -> some View {
-        Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-    }
-
-    // wrapping text for explanations
-    private func note(_ text: String, size: CGFloat = 11, secondary: Bool = false) -> some View {
-        Text(text).font(.system(size: size)).foregroundStyle(secondary ? .secondary : .tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func toggle(_ key: String) -> some View {
-        Toggle("", isOn: model.bool(key)).labelsHidden().toggleStyle(.switch).controlSize(.mini).frame(width: 52)
-    }
-
-    private var headline: String {
-        switch model.state {
-        case .attention: return L("等待你确认", "Needs you")
-        case .working:   return L("正在执行", "Working")
-        case .done:      return L("任务已完成", "Done")
-        case .idle:      return L("当前没有任务", "No tasks right now")
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            let color = Color(nsColor: model.state.color)
-            RoundedRectangle(cornerRadius: 9)
-                .fill(model.state == .idle ? Color.primary.opacity(0.06) : color.opacity(0.18))
-                .frame(width: 36, height: 36)
-                .overlay(Group {
-                    if model.state == .idle {
-                        Circle().stroke(Color.secondary, lineWidth: 1.5).frame(width: 11, height: 11)
-                    } else {
-                        Circle().fill(color).frame(width: 12, height: 12)
-                    }
-                })
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headline).font(.system(size: 14, weight: .semibold))
-                ForEach(model.summary, id: \.self) { note($0, size: 12, secondary: true) }
-            }
-            Spacer(minLength: 0)
-            if model.doneOnScreen {
-                Button(L("熄灭屏幕绿光", "Dismiss glow")) { model.perform(.dismissDone) }.controlSize(.small)
-            }
+    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            caption(title)
+            content()
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
-    private func columnTitle(_ symbol: String, _ title: String) -> some View {
-        VStack(spacing: 2) {
-            Image(systemName: symbol).font(.system(size: 12))
-            Text(title).font(.system(size: 11))
-        }
-        .foregroundStyle(.secondary)
-        .frame(width: 52)
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.system(size: 11, weight: .medium)).foregroundColor(Color(nsColor: .tertiaryLabelColor))
     }
 
-    private var states: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .bottom) {
-                caption(L("AI 助手处于以下状态时亮灯", "Light up when an agent"))
-                Spacer()
-                columnTitle("display", L("屏幕边缘", "Screen"))
-                columnTitle("keyboard", L("键盘", "Keyboard"))
+    // the explanation lives in the tooltip, so the panel itself stays short
+    private func info(_ text: String) -> some View {
+        Image(systemName: "info.circle").font(.system(size: 12))
+            .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+            .help(text)
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Group {
+                if model.state == .idle {
+                    Circle().stroke(Color.secondary, lineWidth: 1.5).frame(width: 11, height: 11)
+                } else {
+                    Circle().fill(Color(nsColor: model.state.color)).frame(width: 12, height: 12)
+                }
             }
-            note(L("关闭某个开关后，该位置在这个状态下不亮灯；键盘会恢复你原本设置的灯效。",
-                   "Switch one off and that place stays dark in that state; the keyboard goes back to its own effect."))
-                .padding(.top, 4)
-            ForEach(Array(styles.enumerated()), id: \.offset) { i, st in
-                if i > 0 { Divider() }
-                stateRow(st).padding(.vertical, 9)
+            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.state.label).font(.system(size: 14, weight: .semibold))
+                ForEach(model.summary, id: \.self) {
+                    Text($0).font(.system(size: 12)).foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                }
+            }
+            Spacer(minLength: 0)
+            if model.doneOnScreen {
+                Button(L("关闭屏幕绿光", "Turn off green glow")) { model.perform(.dismissDone) }.controlSize(.small)
             }
         }
+        .padding(.horizontal, 16).padding(.vertical, 14)
     }
 
     private func stateRow(_ st: GlowStyle) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Circle().fill(Color(nsColor: st.light.color)).frame(width: 10, height: 10)
-                Text(st.light.label).font(.system(size: 13, weight: .medium))
-                Spacer(minLength: 0)
-                toggle(st.onKey)
-                toggle(st.keyboardKey)
-            }
-            // what it means, then how it looks, on one line
-            (Text(st.meaning).font(.system(size: 12)).foregroundColor(.secondary)
-                + Text("  ·  " + st.pattern).font(.system(size: 11)).foregroundColor(Color(nsColor: .tertiaryLabelColor)))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 20)
             HStack(spacing: 8) {
-                Text(L("亮度", "Brightness")).font(.system(size: 12)).foregroundStyle(.secondary)
+                Circle().fill(Color(nsColor: st.light.color)).frame(width: 10, height: 10)
+                Text(st.light.label)
+                info(st.help)
+                Spacer(minLength: 0)
+                Toggle(isOn: model.bool(st.onKey)) { Label(L("屏幕", "Screen"), systemImage: "display") }
+                    .toggleStyle(ChipToggleStyle())
+                Toggle(isOn: model.bool(st.keyboardKey)) { Label(L("键盘", "Keyboard"), systemImage: "keyboard") }
+                    .toggleStyle(ChipToggleStyle())
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "sun.max").font(.system(size: 12)).foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                    .help(L("亮度", "Brightness"))
                 Slider(value: model.double(st.levelKey), in: 0.22...1.0).controlSize(.small)
                 Text("\(Int((UserDefaults.standard.double(forKey: st.levelKey) * 100).rounded()))%")
-                    .font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
+                    .font(.system(size: 12).monospacedDigit()).foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                    .frame(width: 36, alignment: .trailing)
             }
-            .padding(.leading, 20)
-            if st.light == .done { doneDelay.padding(.leading, 20).padding(.top, 2) }
+            .padding(.leading, 18)
+            if st.light == .done {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                    Text(L("屏幕绿光自动关闭", "Turn off screen glow")).font(.system(size: 12)).foregroundColor(.secondary)
+                    info(L("你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭。\n仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。",
+                           "While you are away the glow stays on. Once you use the mouse or keyboard again, it turns off after the chosen time.\nScreen only: the keyboard and the menu bar icon stay green until the next task starts."))
+                    }
+                    Picker("", selection: model.double("doneScreenDelay")) {
+                        ForEach(delays, id: \.seconds) { Text($0.title).tag($0.seconds) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                }
+                .padding(.leading, 18).padding(.top, 4)
+            }
         }
     }
 
-    private var doneDelay: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(L("屏幕上的绿光何时熄灭", "When the green glow leaves the screen")).font(.system(size: 13, weight: .medium))
-            note(L("你不在电脑前时，绿光一直亮着；你回来后（移动鼠标或按下任意键），按所选时间熄灭：",
-                   "While you are away it stays on; once you move the mouse or press a key, it goes out after:"),
-                 size: 12, secondary: true)
-            Picker("", selection: model.double("doneScreenDelay")) {
-                ForEach(delays, id: \.seconds) { Text($0.title).tag($0.seconds) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-            note(L("只影响屏幕边缘。键盘和菜单栏图标会保持绿色，直到你开始下一个任务。",
-                   "Only the screen edges. The keyboard and the menu bar icon stay green until your next task."))
-        }
-    }
-
-    private var keyboardChip: (text: String, good: Bool) {
+    private var keyboardStatus: String {
         switch model.keyboardSync {
-        case .synced:      return (L("USB 有线连接 · 设置已写入", "USB · settings saved"), true)
-        case .pending:     return (L("USB 有线连接 · 正在写入设置", "USB · saving settings"), true)
-        case .oldFirmware: return (L("固件版本过旧", "Firmware too old"), false)
-        case .noCable:     return (L("无线连接", "Wireless"), true)
+        case .synced:      return L("USB 连接 · 设置已写入", "USB · settings saved")
+        case .pending:     return L("USB 连接 · 正在写入", "USB · saving")
+        case .oldFirmware: return L("固件需更新", "firmware update needed")
+        case .noCable:     return L("无线连接", "wireless")
         }
     }
 
     private var keyboard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                caption(L("NuPhy 键盘", "NuPhy keyboard"))
-                Spacer()
-                if model.keyboardName != nil {
-                    let chip = keyboardChip
-                    HStack(spacing: 5) {
-                        Circle().fill(chip.good ? Color.green : Color.orange).frame(width: 6, height: 6)
-                        Text(chip.text).foregroundStyle(.secondary)
-                    }
-                    .font(.system(size: 11))
-                    .padding(.horizontal, 8).padding(.vertical, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
-                }
-            }
+        Group {
             if let name = model.keyboardName {
-                HStack(spacing: 8) {
-                    Image(systemName: "keyboard").foregroundStyle(.secondary)
-                    Text(name)
-                }
-                if model.keyboardNeedsAccess {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 4) {
-                            note(L("需要「输入监控」权限才能控制键盘灯。Agent Lumen 只设置键盘指示灯，不读取任何按键。",
-                                   "Input Monitoring is needed to set the keyboard lights. Agent Lumen only sets indicator LEDs and never reads keys."),
-                                 size: 12, secondary: true)
-                            Button(L("前往开启", "Open settings")) { model.perform(.askKeyboardAccess) }.controlSize(.small)
+                section("\(name) · \(keyboardStatus)") {
+                    if model.keyboardNeedsAccess {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                            Text(L("需要「输入监控」权限", "Needs Input Monitoring"))
+                            info(L("macOS 要求此权限才能设置键盘指示灯。Agent Lumen 仅设置指示灯，不读取按键内容。",
+                                   "macOS requires it to set keyboard LEDs. Agent Lumen only sets the LEDs and never reads keys."))
+                            Spacer(minLength: 0)
+                            Button(L("去开启", "Allow")) { model.perform(.askKeyboardAccess) }.controlSize(.small)
                         }
+                        .padding(.vertical, 4)
                     }
-                }
-                if model.keyboardSync == .oldFirmware {
-                    note(L("当前固件不支持调节亮度和「整块键盘一起亮」，请更新键盘固件。",
-                           "This firmware can't take brightness or whole-keyboard settings. Update the keyboard firmware."),
-                         size: 12, secondary: true)
-                }
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(L("整块键盘一起亮", "Whole keyboard lights up"))
-                        note(L("开启后，按键背光也变成提示颜色并同步明暗；关闭时只有侧边灯条亮。",
-                               "Key backlights take the state colour and breathe too; off, only the side light bar shows it."),
-                             size: 12, secondary: true)
+                    if model.keyboardSync == .oldFirmware {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                            Text(L("当前固件不支持亮度与按键背光设置", "Firmware can't take these settings"))
+                            info(L("状态提示仍可使用。如需调节亮度或使用按键背光同步显示，请更新键盘固件。",
+                                   "Status lights still work. Update the keyboard firmware for brightness and key backlights."))
+                        }
+                        .padding(.vertical, 4)
                     }
-                    Spacer(minLength: 0)
-                    toggle("keyboardKeysBreathe")
+                    HStack(spacing: 6) {
+                        Text(L("按键背光同步显示", "Key backlights show the state"))
+                        info(L("开启：按键背光与侧边灯条一同显示状态颜色。\n关闭：仅侧边灯条显示。\n亮度与本项需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。",
+                               "On: key backlights show the state colour along with the side light bar.\nOff: only the side light bar.\nBrightness and this switch are saved to the keyboard over USB and stay in effect over Bluetooth or 2.4G."))
+                        Spacer(minLength: 0)
+                        Toggle("", isOn: model.bool("keyboardKeysBreathe")).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                    }
+                    .padding(.top, 4)
                 }
-                .padding(.leading, 24)
-                note(L("亮度和「整块键盘一起亮」在 USB 有线连接时写入键盘；改用蓝牙或 2.4G 无线连接后，键盘沿用最后一次写入的设置。",
-                       "Brightness and the whole-keyboard switch are saved to the keyboard over USB. Over Bluetooth or 2.4G it keeps the last saved settings."))
-                    .padding(.leading, 24)
             } else {
-                Text(L("未检测到 NuPhy 键盘", "No NuPhy keyboard connected"))
-                note(L("刷入本项目固件的 NuPhy Air60 V2 或 Halo65 V2 连接到这台 Mac 后，会显示在这里。",
-                       "A NuPhy Air60 V2 or Halo65 V2 with this project's firmware shows up here once connected."))
+                section(L("键盘", "Keyboard")) {
+                    HStack(spacing: 6) {
+                        Text(L("未连接 NuPhy 键盘", "No NuPhy keyboard connected")).foregroundColor(.secondary)
+                        info(L("支持刷入本项目固件的 NuPhy Air60 V2、Halo65 V2。连接到这台 Mac 后在此显示。",
+                               "NuPhy Air60 V2 and Halo65 V2 with this project's firmware show up here once connected."))
+                    }
+                    .padding(.top, 2)
+                }
             }
-        }
-    }
-
-    private func chipText(_ a: AgentRow) -> String {
-        switch a.status {
-        case .lumen:  return a.name
-        case .legacy: return a.name + L(" · 需更新", " · update needed")
-        default:      return a.name + L(" · 未连接", " · not connected")
         }
     }
 
@@ -743,44 +708,52 @@ struct PanelContent: View {
         switch a.status {
         case .lumen:  return L("断开 ", "Disconnect ") + a.name
         case .legacy: return L("更新 ", "Update ") + a.name + L(" 的钩子", " hooks")
-        default:      return L("连接 ", "Connect ") + a.name
+        default:      return L("接入 ", "Connect ") + a.name
         }
+    }
+
+    private func chip(_ a: AgentRow) -> some View {
+        let (symbol, color, suffix, help): (String, Color, String, String)
+        switch a.status {
+        case .lumen:
+            (symbol, color, suffix, help) = ("checkmark", .green, "", L("已接入，状态会触发提示。", "Connected."))
+        case .legacy:
+            (symbol, color, suffix, help) = ("exclamationmark.triangle", .orange, L(" · 需更新", " · update"),
+                                             L("仍在使用旧版键盘灯钩子，请在「管理接入」中更新。", "Uses the old keyboard-light hooks; update them under Manage."))
+        default:
+            (symbol, color, suffix, help) = ("circle.dashed", .secondary, L(" · 未接入", " · off"),
+                                             L("未接入，该助手的状态不会触发提示。", "Not connected; this agent's state shows nowhere."))
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: symbol).foregroundColor(color)
+            Text(a.name + suffix).foregroundColor(.secondary)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 9).padding(.vertical, 3)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .help(help)
     }
 
     private var agents: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                caption(L("已连接的 AI 助手", "AI agents"))
+                caption(L("已接入的 AI 助手", "AI agents"))
                 Spacer()
                 if !model.agents.isEmpty {
-                    Menu(L("添加或移除", "Add or remove")) {
+                    Menu(L("管理接入", "Manage")) {
                         ForEach(model.agents) { a in Button(menuText(a)) { model.perform(.toggleAgent(a.id)) } }
                     }
                     .menuStyle(.borderlessButton).fixedSize().font(.system(size: 12))
                 }
             }
             if model.agents.isEmpty {
-                note(L("这台 Mac 上没有找到支持的 AI 助手（Claude Code、WorkBuddy、Devin）。",
-                       "No supported agent (Claude Code, WorkBuddy, Devin) found on this Mac."), size: 12, secondary: true)
+                Text(L("未检测到 Claude Code、WorkBuddy 或 Devin", "No Claude Code, WorkBuddy or Devin found"))
+                    .font(.system(size: 12)).foregroundColor(.secondary)
             } else {
-                HStack(spacing: 6) {
-                    ForEach(model.agents) { a in
-                        HStack(spacing: 4) {
-                            Image(systemName: a.status == .lumen ? "checkmark" : a.status == .legacy ? "exclamationmark.triangle" : "circle.dashed")
-                                .foregroundStyle(a.status == .lumen ? Color.green : a.status == .legacy ? Color.orange : Color.secondary)
-                            Text(chipText(a)).foregroundStyle(.secondary)
-                        }
-                        .font(.system(size: 11))
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(Color.primary.opacity(0.06)))
-                    }
-                }
-                if model.agents.contains(where: { $0.status != .lumen }) {
-                    note(L("未连接的助手不会触发提示灯；「需更新」表示仍在使用旧版键盘灯钩子。可在「添加或移除」中处理。",
-                           "Agents that are not connected don't light anything; \"update needed\" means old keyboard-light hooks. Fix either under Add or remove."))
-                }
+                HStack(spacing: 6) { ForEach(model.agents) { chip($0) } }
             }
         }
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 }
 
@@ -788,8 +761,7 @@ struct PanelContent: View {
 
 struct GlowStyle {
     let light: Light
-    let meaning: String        // what the state means, for the panel
-    let pattern: String        // how it looks
+    let help: String           // what the state means and how it looks, for the panel's tooltip
     let onKey: String          // shown on the screen edges
     let keyboardKey: String    // shown on the keyboard
     let levelKey: String
@@ -827,14 +799,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
     private let styles = [
-        GlowStyle(light: .attention, meaning: L("需要你批准一项操作，或回答它的提问", "Waiting for your approval or an answer"),
-                  pattern: L("蓝光，每 1.2 秒明暗一次", "Blue, one breath every 1.2 s"),
+        GlowStyle(light: .attention, help: L("AI 助手正在等你批准操作或回答问题。\n蓝色呼吸灯，周期 1.2 秒。",
+                                             "The agent is waiting for your approval or an answer.\nBlue, breathing every 1.2 s."),
                   onKey: "glowAttention", keyboardKey: "keyboardAttention", levelKey: "levelAttention", period: 1.2),
-        GlowStyle(light: .working, meaning: L("正在思考，或正在运行命令、修改文件", "Thinking, running commands or editing files"),
-                  pattern: L("橙光，每 2 秒明暗一次", "Orange, one breath every 2 s"),
+        GlowStyle(light: .working, help: L("AI 助手正在思考、运行命令或修改文件。\n橙色呼吸灯，周期 2 秒。",
+                                           "The agent is thinking, running commands or editing files.\nOrange, breathing every 2 s."),
                   onKey: "glowWorking", keyboardKey: "keyboardWorking", levelKey: "levelWorking", period: 2.0),
-        GlowStyle(light: .done, meaning: L("本轮任务已做完，等你查看结果", "Finished, waiting for you to look"),
-                  pattern: L("绿光，每 3 秒明暗一次", "Green, one breath every 3 s"),
+        GlowStyle(light: .done, help: L("AI 助手已完成本轮任务，等你查看结果。\n绿色呼吸灯，周期 3 秒。",
+                                        "The agent has finished and is waiting for you to look.\nGreen, breathing every 3 s."),
                   onKey: "glowDone", keyboardKey: "keyboardDone", levelKey: "levelDone", period: 3.0),
     ]
     private let minLevel = 0.22
@@ -844,7 +816,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         (0, L("立即", "At once")),
         (8, L("8 秒后", "8 s")),
         (30, L("30 秒后", "30 s")),
-        (-1, L("一直亮着", "Never")),
+        (-1, L("不关闭", "Never")),
     ]
     private let fadeSeconds = 2.0
 
@@ -1088,15 +1060,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshPanel() {
         panel.state = state
         let byAgent = Dictionary(grouping: sessions, by: \.agent)
+        // one line per agent: just the count when all its sessions are in the state the header shows
         panel.summary = byAgent.isEmpty
-            ? [L("AI 助手开始工作后，这里会显示它的状态。", "Agent states show up here once an agent starts working.")]
+            ? [L("暂无进行中的任务", "Nothing in progress")]
             : ["Claude Code", "WorkBuddy", "Devin"].compactMap { agent in
                 guard let list = byAgent[agent] else { return nil }
+                if list.allSatisfy({ $0.light == state }) {
+                    return agent + " · " + L("\(list.count) 个会话", "\(list.count) session\(list.count == 1 ? "" : "s")")
+                }
                 let parts = [Light.attention, .working, .done].compactMap { l -> String? in
                     let n = list.filter { $0.light == l }.count
-                    return n == 0 ? nil : L("\(n) 个会话\(l.label)", "\(n) \(l.label)")
+                    return n == 0 ? nil : "\(l.label) \(n)"
                 }
-                return agent + L("：", ": ") + parts.joined(separator: L("，", ", "))
+                return agent + " · " + parts.joined(separator: L("、", ", "))
             }
         panel.doneOnScreen = glow == .done && fadeStart == nil && sliderPreview == nil
         // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
