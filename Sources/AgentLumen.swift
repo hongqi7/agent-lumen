@@ -5,6 +5,7 @@
 import AppKit
 import IOKit.hid
 import QuartzCore
+import SwiftUI
 
 let home = ProcessInfo.processInfo.environment["AGENT_LUMEN_HOME"] ?? NSHomeDirectory()   // override for tests
 let lumenDir = home + "/.agent-lumen"
@@ -44,9 +45,9 @@ enum Light: Int, Comparable {
 
     var label: String {
         switch self {
-        case .working:   return L("任务中", "working")
-        case .attention: return L("等你批准", "needs you")
-        case .done:      return L("完成任务", "done")
+        case .working:   return L("正在执行", "working")
+        case .attention: return L("等待你确认", "needs you")
+        case .done:      return L("已完成", "done")
         case .idle:      return L("空闲", "idle")
         }
     }
@@ -469,11 +470,322 @@ final class KeyboardSettings {
     }
 }
 
+// MARK: - panel
+
+struct AgentRow: Identifiable {
+    let id: Int
+    let name: String
+    let status: AgentTarget.Status
+}
+
+enum PanelAction { case dismissDone, toggleAgent(Int), askKeyboardAccess, toggleLogin, quit }
+
+// what the panel shows; the app delegate fills it in and carries out the actions
+final class PanelModel: ObservableObject {
+    @Published var state = Light.idle
+    @Published var summary: [String] = []
+    @Published var doneOnScreen = false
+    @Published var keyboardName: String?
+    @Published var keyboardSync = KeyboardSettings.Sync.noCable
+    @Published var keyboardNeedsAccess = false
+    @Published var agents: [AgentRow] = []
+    @Published var openAtLogin = false
+    var changed: (String) -> Void = { _ in }
+    var perform: (PanelAction) -> Void = { _ in }
+
+    func bool(_ key: String) -> Binding<Bool> {
+        Binding(get: { UserDefaults.standard.bool(forKey: key) },
+                set: { self.objectWillChange.send(); UserDefaults.standard.set($0, forKey: key); self.changed(key) })
+    }
+
+    func double(_ key: String) -> Binding<Double> {
+        Binding(get: { UserDefaults.standard.double(forKey: key) },
+                set: { self.objectWillChange.send(); UserDefaults.standard.set($0, forKey: key); self.changed(key) })
+    }
+}
+
+struct PanelView: View {
+    @ObservedObject var model: PanelModel
+    let styles: [GlowStyle]
+    let delays: [(seconds: Double, title: String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            states.padding(16)
+            Divider()
+            keyboard.padding(16)
+            Divider()
+            agents.padding(16)
+            Divider()
+            HStack {
+                Text(L("开机时自动打开", "Open at login"))
+                Spacer()
+                Toggle("", isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            Divider()
+            Button { model.perform(.quit) } label: {
+                HStack {
+                    Text(L("退出 Agent Lumen", "Quit Agent Lumen"))
+                    Spacer()
+                    Text("⌘Q").foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .keyboardShortcut("q")
+            .padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .font(.system(size: 13))
+        .frame(width: 380)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+    }
+
+    // wrapping text for explanations
+    private func note(_ text: String, size: CGFloat = 11, secondary: Bool = false) -> some View {
+        Text(text).font(.system(size: size)).foregroundStyle(secondary ? .secondary : .tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func toggle(_ key: String) -> some View {
+        Toggle("", isOn: model.bool(key)).labelsHidden().toggleStyle(.switch).controlSize(.mini).frame(width: 52)
+    }
+
+    private var headline: String {
+        switch model.state {
+        case .attention: return L("等待你确认", "Needs you")
+        case .working:   return L("正在执行", "Working")
+        case .done:      return L("任务已完成", "Done")
+        case .idle:      return L("当前没有任务", "No tasks right now")
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            let color = Color(nsColor: model.state.color)
+            RoundedRectangle(cornerRadius: 9)
+                .fill(model.state == .idle ? Color.primary.opacity(0.06) : color.opacity(0.18))
+                .frame(width: 36, height: 36)
+                .overlay(Group {
+                    if model.state == .idle {
+                        Circle().stroke(Color.secondary, lineWidth: 1.5).frame(width: 11, height: 11)
+                    } else {
+                        Circle().fill(color).frame(width: 12, height: 12)
+                    }
+                })
+            VStack(alignment: .leading, spacing: 2) {
+                Text(headline).font(.system(size: 14, weight: .semibold))
+                ForEach(model.summary, id: \.self) { note($0, size: 12, secondary: true) }
+            }
+            Spacer(minLength: 0)
+            if model.doneOnScreen {
+                Button(L("熄灭屏幕绿光", "Dismiss glow")) { model.perform(.dismissDone) }.controlSize(.small)
+            }
+        }
+        .padding(16)
+    }
+
+    private func columnTitle(_ symbol: String, _ title: String) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol).font(.system(size: 12))
+            Text(title).font(.system(size: 11))
+        }
+        .foregroundStyle(.secondary)
+        .frame(width: 52)
+    }
+
+    private var states: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .bottom) {
+                caption(L("AI 助手处于以下状态时亮灯", "Light up when an agent"))
+                Spacer()
+                columnTitle("display", L("屏幕边缘", "Screen"))
+                columnTitle("keyboard", L("键盘", "Keyboard"))
+            }
+            note(L("关闭某个开关后，该位置在这个状态下不亮灯；键盘会恢复你原本设置的灯效。",
+                   "Switch one off and that place stays dark in that state; the keyboard goes back to its own effect."))
+                .padding(.top, 4)
+            ForEach(Array(styles.enumerated()), id: \.offset) { i, st in
+                if i > 0 { Divider() }
+                stateRow(st).padding(.vertical, 12)
+            }
+        }
+    }
+
+    private func stateRow(_ st: GlowStyle) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle().fill(Color(nsColor: st.light.color)).frame(width: 10, height: 10)
+                Text(st.light.label).font(.system(size: 13, weight: .medium))
+                Spacer(minLength: 0)
+                toggle(st.onKey)
+                toggle(st.keyboardKey)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                note(st.meaning, size: 12, secondary: true)
+                note(st.pattern)
+            }
+            .padding(.leading, 20)
+            HStack(spacing: 8) {
+                Text(L("亮度", "Brightness")).font(.system(size: 12)).foregroundStyle(.secondary)
+                Slider(value: model.double(st.levelKey), in: 0.22...1.0).controlSize(.small)
+                Text("\(Int((UserDefaults.standard.double(forKey: st.levelKey) * 100).rounded()))%")
+                    .font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+            }
+            .padding(.leading, 20)
+            if st.light == .done { doneDelay.padding(.leading, 20).padding(.top, 4) }
+        }
+    }
+
+    private var doneDelay: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L("屏幕上的绿光何时熄灭", "When the green glow leaves the screen")).font(.system(size: 13, weight: .medium))
+            note(L("任务完成时你不在电脑前，绿光会一直亮着。你回来后，只要移动鼠标或按下任意键，就按下面的时间熄灭：",
+                   "If you are away when a task finishes, the glow stays on. Once you move the mouse or press a key, it goes out after:"),
+                 size: 12, secondary: true)
+            Picker("", selection: model.double("doneScreenDelay")) {
+                ForEach(delays, id: \.seconds) { Text($0.title).tag($0.seconds) }
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            note(L("只影响屏幕边缘。键盘和菜单栏图标会保持绿色，直到你开始下一个任务。",
+                   "Only the screen edges. The keyboard and the menu bar icon stay green until your next task."))
+        }
+    }
+
+    private var keyboardChip: (text: String, good: Bool) {
+        switch model.keyboardSync {
+        case .synced:      return (L("USB 有线连接 · 设置已写入", "USB · settings saved"), true)
+        case .pending:     return (L("USB 有线连接 · 正在写入设置", "USB · saving settings"), true)
+        case .oldFirmware: return (L("固件版本过旧", "Firmware too old"), false)
+        case .noCable:     return (L("无线连接", "Wireless"), true)
+        }
+    }
+
+    private var keyboard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                caption(L("NuPhy 键盘", "NuPhy keyboard"))
+                Spacer()
+                if model.keyboardName != nil {
+                    let chip = keyboardChip
+                    HStack(spacing: 5) {
+                        Circle().fill(chip.good ? Color.green : Color.orange).frame(width: 6, height: 6)
+                        Text(chip.text).foregroundStyle(.secondary)
+                    }
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 8).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+            }
+            if let name = model.keyboardName {
+                HStack(spacing: 8) {
+                    Image(systemName: "keyboard").foregroundStyle(.secondary)
+                    Text(name)
+                }
+                if model.keyboardNeedsAccess {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 4) {
+                            note(L("需要「输入监控」权限才能控制键盘灯。Agent Lumen 只设置键盘指示灯，不读取任何按键。",
+                                   "Input Monitoring is needed to set the keyboard lights. Agent Lumen only sets indicator LEDs and never reads keys."),
+                                 size: 12, secondary: true)
+                            Button(L("前往开启", "Open settings")) { model.perform(.askKeyboardAccess) }.controlSize(.small)
+                        }
+                    }
+                }
+                if model.keyboardSync == .oldFirmware {
+                    note(L("当前固件不支持调节亮度和「整块键盘一起亮」，请更新键盘固件。",
+                           "This firmware can't take brightness or whole-keyboard settings. Update the keyboard firmware."),
+                         size: 12, secondary: true)
+                }
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L("整块键盘一起亮", "Whole keyboard lights up"))
+                        note(L("开启后，按键背光也变成提示颜色并同步明暗；关闭时只有侧边灯条亮。",
+                               "Key backlights take the state colour and breathe too; off, only the side light bar shows it."),
+                             size: 12, secondary: true)
+                    }
+                    Spacer(minLength: 0)
+                    toggle("keyboardKeysBreathe")
+                }
+                .padding(.leading, 24)
+                note(L("亮度和「整块键盘一起亮」需在 USB 有线连接时写入键盘。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置。",
+                       "Brightness and the whole-keyboard switch are saved to the keyboard over USB. Over Bluetooth or 2.4G it keeps the last saved settings."))
+                    .padding(.leading, 24)
+            } else {
+                Text(L("未检测到 NuPhy 键盘", "No NuPhy keyboard connected"))
+                note(L("刷入本项目固件的 NuPhy Air60 V2 或 Halo65 V2 连接到这台 Mac 后，会显示在这里。",
+                       "A NuPhy Air60 V2 or Halo65 V2 with this project's firmware shows up here once connected."))
+            }
+        }
+    }
+
+    private func chipText(_ a: AgentRow) -> String {
+        switch a.status {
+        case .lumen:  return a.name
+        case .legacy: return a.name + L(" · 需更新", " · update needed")
+        default:      return a.name + L(" · 未连接", " · not connected")
+        }
+    }
+
+    private func menuText(_ a: AgentRow) -> String {
+        switch a.status {
+        case .lumen:  return L("断开 ", "Disconnect ") + a.name
+        case .legacy: return L("更新 ", "Update ") + a.name + L(" 的钩子", " hooks")
+        default:      return L("连接 ", "Connect ") + a.name
+        }
+    }
+
+    private var agents: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                caption(L("已连接的 AI 助手", "AI agents"))
+                Spacer()
+                if !model.agents.isEmpty {
+                    Menu(L("添加或移除", "Add or remove")) {
+                        ForEach(model.agents) { a in Button(menuText(a)) { model.perform(.toggleAgent(a.id)) } }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize().font(.system(size: 12))
+                }
+            }
+            if model.agents.isEmpty {
+                note(L("这台 Mac 上没有找到支持的 AI 助手（Claude Code、WorkBuddy、Devin）。",
+                       "No supported agent (Claude Code, WorkBuddy, Devin) found on this Mac."), size: 12, secondary: true)
+            } else {
+                HStack(spacing: 6) {
+                    ForEach(model.agents) { a in
+                        HStack(spacing: 4) {
+                            Image(systemName: a.status == .lumen ? "checkmark" : a.status == .legacy ? "exclamationmark.triangle" : "circle.dashed")
+                                .foregroundStyle(a.status == .lumen ? Color.green : a.status == .legacy ? Color.orange : Color.secondary)
+                            Text(chipText(a)).foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 11))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    }
+                }
+                if model.agents.contains(where: { $0.status != .lumen }) {
+                    note(L("未连接的助手不会触发提示灯；「需更新」表示仍在使用旧版键盘灯钩子。可在「添加或移除」中处理。",
+                           "Agents that are not connected don't light anything; \"update needed\" means old keyboard-light hooks. Fix either under Add or remove."))
+                }
+            }
+        }
+    }
+}
+
 // MARK: - app
 
 struct GlowStyle {
     let light: Light
-    let title: String
+    let meaning: String        // what the state means, for the panel
+    let pattern: String        // how it looks
     let onKey: String          // shown on the screen edges
     let keyboardKey: String    // shown on the keyboard
     let levelKey: String
@@ -485,7 +797,7 @@ func secondsSinceInput() -> TimeInterval {
     CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let dot = CALayer()
     private let halo = CALayer()
@@ -505,37 +817,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
     private let keyboard = KeyboardLight()
     private let keyboardSettings = KeyboardSettings()
+    private let popover = NSPopover()
+    private let panel = PanelModel()
 
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
     private let styles = [
-        GlowStyle(light: .attention, title: L("等你批准：蓝光呼吸", "Needs you: blue"), onKey: "glowAttention", keyboardKey: "keyboardAttention",
-                  levelKey: "levelAttention", period: 1.2),
-        GlowStyle(light: .done, title: L("完成任务：绿光呼吸", "Done: green"), onKey: "glowDone", keyboardKey: "keyboardDone",
-                  levelKey: "levelDone", period: 3.0),
-        GlowStyle(light: .working, title: L("任务中：橙光呼吸", "Working: orange"), onKey: "glowWorking", keyboardKey: "keyboardWorking",
-                  levelKey: "levelWorking", period: 2.0),
+        GlowStyle(light: .attention, meaning: L("需要你批准一项操作，或回答它的提问", "Waiting for your approval or an answer"),
+                  pattern: L("蓝光，每 1.2 秒明暗一次", "Blue, one breath every 1.2 s"),
+                  onKey: "glowAttention", keyboardKey: "keyboardAttention", levelKey: "levelAttention", period: 1.2),
+        GlowStyle(light: .working, meaning: L("正在思考，或正在运行命令、修改文件", "Thinking, running commands or editing files"),
+                  pattern: L("橙光，每 2 秒明暗一次", "Orange, one breath every 2 s"),
+                  onKey: "glowWorking", keyboardKey: "keyboardWorking", levelKey: "levelWorking", period: 2.0),
+        GlowStyle(light: .done, meaning: L("本轮任务已做完，等你查看结果", "Finished, waiting for you to look"),
+                  pattern: L("绿光，每 3 秒明暗一次", "Green, one breath every 3 s"),
+                  onKey: "glowDone", keyboardKey: "keyboardDone", levelKey: "levelDone", period: 3.0),
     ]
-    // how long the screen keeps green after you are back: 0 = at once, -1 = until the next task
-    private let doneDelays: [(seconds: Double, title: String)] = [
-        (0, L("你一动就熄灭", "as soon as you're back")),
-        (8, L("你回来 8 秒后熄灭", "8 seconds after you're back")),
-        (30, L("你回来 30 秒后熄灭", "30 seconds after you're back")),
-        (-1, L("一直亮到下一个任务", "until the next task")),
-    ]
-    private let fadeSeconds = 2.0
     private let minLevel = 0.22
     private let maxLevel = 1.0
+    // how long the screen keeps green after you are back: 0 = at once, -1 = until the next task
+    private let doneDelays: [(seconds: Double, title: String)] = [
+        (0, L("立即", "At once")),
+        (8, L("8 秒后", "8 s")),
+        (30, L("30 秒后", "30 s")),
+        (-1, L("一直亮着", "Never")),
+    ]
+    private let fadeSeconds = 2.0
 
     private func style(_ light: Light) -> GlowStyle? { styles.first { $0.light == light } }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardSync": true, "keyboardKeysBreathe": false,
+        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardKeysBreathe": false,
                                       "keyboardAttention": true, "keyboardDone": true, "keyboardWorking": true, "doneScreenDelay": 8.0,
                                       "levelAttention": 1.0, "levelDone": 0.35, "levelWorking": 0.35])
-        let menu = NSMenu()
-        menu.delegate = self
-        item.menu = menu
+        // the old menu had one switch for the whole keyboard; it is now a switch per state
+        if defaults.object(forKey: "keyboardSync") as? Bool == false {
+            styles.forEach { defaults.set(false, forKey: $0.keyboardKey) }
+            defaults.removeObject(forKey: "keyboardSync")
+        }
+        panel.changed = { [weak self] key in self?.settingChanged(key) }
+        panel.perform = { [weak self] action in self?.perform(action) }
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: PanelView(model: panel, styles: styles, delays: doneDelays))
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel)
         buildWindows()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
@@ -552,6 +877,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let resend = Timer(timeInterval: 20, repeats: true) { [weak self] _ in self?.syncKeyboard(force: true) }
         RunLoop.main.add(resend, forMode: .common)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.offerHooksOnFirstRun() }
+        // for screenshots of the panel: AGENT_LUMEN_OPEN_PANEL=1 opens it right away
+        if ProcessInfo.processInfo.environment["AGENT_LUMEN_OPEN_PANEL"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.togglePanel() }
+        }
     }
 
     // levels in the keyboard's order: working, done, needs you; byte 4 bit0 = the whole keyboard breathes
@@ -575,7 +904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func syncKeyboard(force: Bool = false) {
-        let want = defaults.bool(forKey: "keyboardSync") ? strongest { self.defaults.bool(forKey: $0.keyboardKey) } ?? .idle : .idle
+        let want = strongest { self.defaults.bool(forKey: $0.keyboardKey) } ?? .idle
         guard force || want != keyboardState else { return }
         keyboardState = want
         if want != .idle, !keyboard.names.isEmpty, keyboard.access == kIOHIDAccessTypeUnknown, !defaults.bool(forKey: "askedKeyboardAccess") {
@@ -639,6 +968,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncKeyboard()
         updateGlow()
         updateAnimating()
+        if popover.isShown { refreshPanel() }
     }
 
     // menu bar dot: coloured when busy or done, a hollow ring when idle; animate() makes it breathe
@@ -734,214 +1064,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
-    private func menuDot(_ light: Light) -> NSImage {
-        NSImage(size: NSSize(width: 12, height: 12), flipped: false) { r in
-            light.color.setFill()
-            NSBezierPath(ovalIn: r.insetBy(dx: 2, dy: 2)).fill()
-            return true
-        }
+    // MARK: panel
+
+    @objc private func togglePanel() {
+        if popover.isShown { return popover.performClose(nil) }
+        guard let button = item.button else { return }
+        tick()
+        refreshPanel()
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
-    // MARK: menu
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        sessions = readSessions(includeLegacy: legacyHooksInUse)
-
+    private func refreshPanel() {
+        panel.state = state
         let byAgent = Dictionary(grouping: sessions, by: \.agent)
-        if byAgent.isEmpty {
-            menu.addItem(disabled(L("当前没有会话", "No agent sessions")))
-        }
-        for agent in ["Claude Code", "WorkBuddy", "Devin"] {
-            guard let list = byAgent[agent] else { continue }
-            let parts = [Light.attention, .working, .done].compactMap { l -> String? in
-                let n = list.filter { $0.light == l }.count
-                return n > 0 ? "\(l.label) \(n)" : nil
-            }
-            let line = disabled("\(agent)\(L("：", ": "))\(parts.joined(separator: L("，", ", ")))")
-            line.image = menuDot(list.map(\.light).max() ?? .idle)
-            menu.addItem(line)
-        }
-
-        menu.addItem(.separator())
-        menu.addItem(disabled(L("屏幕边缘发光（拖动滑块可预览）", "Screen edge glow (drag to preview)")))
-        for st in styles {
-            let mi = NSMenuItem(title: st.title, action: #selector(toggleOption(_:)), keyEquivalent: "")
-            mi.target = self
-            mi.representedObject = st.onKey
-            mi.state = defaults.bool(forKey: st.onKey) ? .on : .off
-            mi.image = menuDot(st.light)
-            menu.addItem(mi)
-            menu.addItem(sliderItem(st))
-            if st.light == .done { menu.addItem(doneDelayItem()) }
-        }
-        if glow == .done && fadeStart == nil && sliderPreview == nil {
-            let ok = NSMenuItem(title: L("知道了，屏幕上的绿光先灭掉", "Got it — turn off the green glow"), action: #selector(dismissDone), keyEquivalent: "")
-            ok.target = self
-            menu.addItem(ok)
-        }
-
-        menu.addItem(.separator())
-        menu.addItem(disabled(L("接入的 AI 工具", "Connected agents")))
-        for (i, t) in targets.enumerated() {
-            let status = t.status
-            if status == .absent { continue }
-            let text: String
-            switch status {
-            case .lumen:  text = L("已接入", "connected")
-            case .legacy: text = L("用的是旧版键盘灯钩子，点击换成共享钩子", "old keyboard-light hooks — click to switch")
-            default:      text = L("未接入，点击接入", "not connected — click to connect")
-            }
-            let mi = NSMenuItem(title: "\(t.name)\(L("：", ": "))\(text)", action: #selector(toggleHooks(_:)), keyEquivalent: "")
-            mi.target = self
-            mi.tag = i
-            mi.state = status == .lumen ? .on : .off
-            menu.addItem(mi)
-        }
-
-        menu.addItem(.separator())
-        let names = keyboard.names
-        if names.isEmpty {
-            menu.addItem(disabled(L("键盘灯：没有连接 NuPhy 键盘", "Keyboard light: no NuPhy keyboard connected")))
-        } else {
-            let mi = NSMenuItem(title: L("键盘灯同步：", "Keyboard light: ") + names.joined(separator: L("、", ", ")),
-                                action: #selector(toggleKeyboard), keyEquivalent: "")
-            mi.target = self
-            mi.state = defaults.bool(forKey: "keyboardSync") ? .on : .off
-            menu.addItem(mi)
-            if defaults.bool(forKey: "keyboardSync") {
-                for st in styles {
-                    let k = NSMenuItem(title: L("    键盘显示", "    Show on keyboard: ") + st.light.label, action: #selector(toggleOption(_:)), keyEquivalent: "")
-                    k.target = self
-                    k.representedObject = st.keyboardKey
-                    k.state = defaults.bool(forKey: st.keyboardKey) ? .on : .off
-                    k.image = menuDot(st.light)
-                    menu.addItem(k)
+        panel.summary = byAgent.isEmpty
+            ? [L("AI 助手开始工作后，这里会显示它的状态。", "Agent states show up here once an agent starts working.")]
+            : ["Claude Code", "WorkBuddy", "Devin"].compactMap { agent in
+                guard let list = byAgent[agent] else { return nil }
+                let parts = [Light.attention, .working, .done].compactMap { l -> String? in
+                    let n = list.filter { $0.light == l }.count
+                    return n == 0 ? nil : L("\(n) 个会话\(l.label)", "\(n) \(l.label)")
                 }
+                return agent + L("：", ": ") + parts.joined(separator: L("，", ", "))
             }
-            let keys = NSMenuItem(title: L("整个键盘一起呼吸", "Whole keyboard breathes too"), action: #selector(toggleKeysBreathe), keyEquivalent: "")
-            keys.target = self
-            keys.state = defaults.bool(forKey: "keyboardKeysBreathe") ? .on : .off
-            menu.addItem(keys)
-            let note: String
-            switch keyboardSettings.status {
-            case .synced:      note = L("    亮度和开关已同步到键盘（插线时实时调整）", "    Brightness and switch synced (live while wired)")
-            case .oldFirmware: note = L("    键盘固件太旧，不支持调亮度，请更新固件", "    Keyboard firmware too old for these settings")
-            case .pending:     note = L("    正在同步到键盘…", "    Syncing to the keyboard…")
-            case .noCable:     note = L("    亮度和开关在插线时同步到键盘，拔线后照样生效", "    Brightness and switch sync while wired, then stay")
+        panel.doneOnScreen = glow == .done && fadeStart == nil && sliderPreview == nil
+        // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
+        panel.keyboardName = keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) }
+        panel.keyboardSync = keyboardSettings.status
+        panel.keyboardNeedsAccess = !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted
+        panel.agents = targets.enumerated().compactMap { i, t in
+            let status = t.status
+            return status == .absent ? nil : AgentRow(id: i, name: t.name, status: status)
+        }
+        panel.openAtLogin = FileManager.default.fileExists(atPath: loginAgentPath)
+    }
+
+    private func settingChanged(_ key: String) {
+        if let st = styles.first(where: { $0.levelKey == key }) {
+            // dragging shows that colour breathing at the new strength for a moment
+            sliderPreview = (st.light, Date().addingTimeInterval(1.5))
+            updateGlow()
+            updateAnimating()
+            keyboardSettings.send()
+        } else if key == "keyboardKeysBreathe" {
+            keyboardSettings.send(force: true)
+        } else if styles.contains(where: { $0.keyboardKey == key }) {
+            sessions = readSessions(includeLegacy: legacyHooksInUse)
+            syncKeyboard(force: true)
+        } else {
+            tick()
+        }
+    }
+
+    private func perform(_ action: PanelAction) {
+        switch action {
+        case .dismissDone:
+            if let newest = sessions.filter({ $0.light == .done }).map(\.changed).max() { doneSeenThrough = newest }
+            tick()
+        case .toggleAgent(let i):
+            popover.performClose(nil)
+            let t = targets[i]
+            connect([t], install: t.status != .lumen)
+        case .askKeyboardAccess:
+            // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
+            keyboard.requestAccess()
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+        case .toggleLogin:
+            if FileManager.default.fileExists(atPath: loginAgentPath) {
+                try? FileManager.default.removeItem(atPath: loginAgentPath)
+            } else {
+                writeLoginItem()
             }
-            menu.addItem(disabled(note))
-            if defaults.bool(forKey: "keyboardSync") && keyboard.access != kIOHIDAccessTypeGranted {
-                let ask = NSMenuItem(title: L("    需要“输入监控”权限，点此开启", "    Needs Input Monitoring — click to allow"),
-                                     action: #selector(askKeyboardAccess), keyEquivalent: "")
-                ask.target = self
-                menu.addItem(ask)
-            }
+            refreshPanel()
+        case .quit:
+            NSApp.terminate(nil)
         }
-
-        menu.addItem(.separator())
-        let login = NSMenuItem(title: L("开机自动启动", "Open at login"), action: #selector(toggleLogin), keyEquivalent: "")
-        login.target = self
-        login.state = FileManager.default.fileExists(atPath: loginAgentPath) ? .on : .off
-        menu.addItem(login)
-        menu.addItem(NSMenuItem(title: L("退出 Agent Lumen", "Quit Agent Lumen"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-    }
-
-    private func disabled(_ title: String) -> NSMenuItem {
-        let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        mi.isEnabled = false
-        return mi
-    }
-
-    private func sliderItem(_ st: GlowStyle) -> NSMenuItem {
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
-        let weak = NSTextField(labelWithString: L("弱", "dim"))
-        let strong = NSTextField(labelWithString: L("强", "bright"))
-        for l in [weak, strong] {
-            l.font = .menuFont(ofSize: 11)
-            l.textColor = .secondaryLabelColor
-        }
-        weak.alignment = .right
-        weak.frame = NSRect(x: 18, y: 5, width: 36, height: 15)
-        strong.frame = NSRect(x: 240, y: 5, width: 40, height: 15)
-        let slider = NSSlider(value: defaults.double(forKey: st.levelKey), minValue: minLevel, maxValue: maxLevel,
-                              target: self, action: #selector(levelChanged(_:)))
-        slider.isContinuous = true
-        slider.tag = st.light.rawValue
-        slider.frame = NSRect(x: 58, y: 2, width: 178, height: 22)
-        [weak, slider, strong].forEach { box.addSubview($0) }
-        let mi = NSMenuItem()
-        mi.view = box
-        return mi
-    }
-
-    private func doneDelayItem() -> NSMenuItem {
-        let current = defaults.double(forKey: "doneScreenDelay")
-        let title = doneDelays.first { $0.seconds == current }?.title ?? doneDelays[1].title
-        let mi = NSMenuItem(title: L("    屏幕绿光：", "    Screen green: ") + title, action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for d in doneDelays {
-            let o = NSMenuItem(title: d.title, action: #selector(setDoneDelay(_:)), keyEquivalent: "")
-            o.target = self
-            o.representedObject = d.seconds
-            o.state = d.seconds == current ? .on : .off
-            sub.addItem(o)
-        }
-        sub.addItem(.separator())
-        sub.addItem(disabled(L("键盘和状态栏的绿色会一直保持到下一个任务", "The keyboard and menu bar stay green until the next task")))
-        mi.submenu = sub
-        return mi
-    }
-
-    @objc private func setDoneDelay(_ sender: NSMenuItem) {
-        guard let seconds = sender.representedObject as? Double else { return }
-        defaults.set(seconds, forKey: "doneScreenDelay")
-        tick()
-    }
-
-    @objc private func dismissDone() {
-        if let newest = sessions.filter({ $0.light == .done }).map(\.changed).max() { doneSeenThrough = newest }
-        tick()
-    }
-
-    // dragging shows that colour breathing at the new strength for a moment
-    @objc private func levelChanged(_ sender: NSSlider) {
-        guard let light = Light(rawValue: sender.tag), let st = style(light) else { return }
-        defaults.set(sender.doubleValue, forKey: st.levelKey)
-        sliderPreview = (light, Date().addingTimeInterval(1.5))
-        updateGlow()
-        updateAnimating()
-        keyboardSettings.send()
-    }
-
-    @objc private func toggleKeysBreathe() {
-        defaults.set(!defaults.bool(forKey: "keyboardKeysBreathe"), forKey: "keyboardKeysBreathe")
-        keyboardSettings.send(force: true)
-    }
-
-    @objc private func toggleKeyboard() {
-        defaults.set(!defaults.bool(forKey: "keyboardSync"), forKey: "keyboardSync")
-        syncKeyboard(force: true)
-    }
-
-    // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
-    @objc private func askKeyboardAccess() {
-        keyboard.requestAccess()
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
-    }
-
-    @objc private func toggleOption(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String else { return }
-        defaults.set(!defaults.bool(forKey: key), forKey: key)
-        tick()
     }
 
     // MARK: hooks
-
-    @objc private func toggleHooks(_ sender: NSMenuItem) {
-        let t = targets[sender.tag]
-        connect([t], install: t.status != .lumen)
-    }
 
     private func connect(_ list: [AgentTarget], install: Bool) {
         var failed: [String] = []
@@ -1003,14 +1205,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let plist = NSDictionary(contentsOfFile: loginAgentPath),
               (plist["ProgramArguments"] as? [String])?.first != exe else { return }
         writeLoginItem()
-    }
-
-    @objc private func toggleLogin() {
-        if FileManager.default.fileExists(atPath: loginAgentPath) {
-            try? FileManager.default.removeItem(atPath: loginAgentPath)
-        } else {
-            writeLoginItem()
-        }
     }
 }
 
