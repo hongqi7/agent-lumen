@@ -536,6 +536,36 @@ struct ChipToggleStyle: ToggleStyle {
     }
 }
 
+// ⓘ: hovering shows the explanation, a click keeps it open until clicked again or dismissed
+struct InfoButton: View {
+    let text: String
+    @State private var hovering = false
+    @State private var pinned = ProcessInfo.processInfo.environment["AGENT_LUMEN_SHOW_INFO"] != nil
+
+    var body: some View {
+        Button { pinned.toggle() } label: {
+            Image(systemName: hovering || pinned ? "info.circle.fill" : "info.circle")
+                .font(.system(size: 12))
+                .foregroundColor(hovering || pinned ? .accentColor : Color(nsColor: .tertiaryLabelColor))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hovering = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .popover(isPresented: Binding(get: { hovering || pinned }, set: { if !$0 { hovering = false; pinned = false } }),
+                 arrowEdge: .bottom) {
+            Text(text)
+                .font(.system(size: 12))
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 240, alignment: .leading)
+                .padding(12)
+        }
+    }
+}
+
 struct PanelContent: View {
     @ObservedObject var model: PanelModel
     let styles: [GlowStyle]
@@ -580,12 +610,8 @@ struct PanelContent: View {
         Text(text).font(.system(size: 11, weight: .medium)).foregroundColor(Color(nsColor: .tertiaryLabelColor))
     }
 
-    // the explanation lives in the tooltip, so the panel itself stays short
-    private func info(_ text: String) -> some View {
-        Image(systemName: "info.circle").font(.system(size: 12))
-            .foregroundColor(Color(nsColor: .tertiaryLabelColor))
-            .help(text)
-    }
+    // the explanation opens beside the ⓘ, so the panel itself stays short
+    private func info(_ text: String) -> some View { InfoButton(text: text) }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
