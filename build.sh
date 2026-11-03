@@ -4,7 +4,7 @@
 #   ./build.sh install    -> also copy the app to /Applications and open it
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$HERE/build"
 APP="$BUILD/Agent Lumen.app"
@@ -54,6 +54,13 @@ if [ "${1:-}" = "install" ]; then
     pkill -x AgentLumen 2>/dev/null || true
     rm -rf "/Applications/Agent Lumen.app"
     cp -R "$APP" /Applications/
+    # macOS ties Input Monitoring to the signature, and an ad-hoc one changes with every build. Signing the
+    # local copy with your own development certificate keeps the grant across rebuilds. The release zip
+    # stays ad-hoc, since a personal certificate would carry your name and email inside the app.
+    IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development|Developer ID Application/ {print $2; exit}')}"
+    if [ -n "$IDENTITY" ]; then
+        codesign --force --sign "$IDENTITY" "/Applications/Agent Lumen.app" && echo "signed with: $IDENTITY"
+    fi
     open "/Applications/Agent Lumen.app"
     echo "installed: /Applications/Agent Lumen.app"
 fi

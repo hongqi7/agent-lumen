@@ -90,6 +90,16 @@ let breatheTable: [UInt8] = [
     7, 6, 5, 4, 3, 2, 1, 0,
 ]
 
+// a small diagnostics log, ~/.agent-lumen/lumen.log, trimmed to its last 200 lines
+func lumenLog(_ text: String) {
+    let path = lumenDir + "/lumen.log"
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    var lines = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    lines.append("\(stamp) \(text)")
+    try? FileManager.default.createDirectory(atPath: lumenDir, withIntermediateDirectories: true)
+    try? (lines.suffix(200).joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+}
+
 // 0...1...0 once per period, following breatheTable
 func wave(_ t: CFTimeInterval, _ period: Double) -> CGFloat {
     let phase = t.truncatingRemainder(dividingBy: period) / period * Double(breatheTable.count)
@@ -301,10 +311,15 @@ final class KeyboardLight {
 
     private func openIfAllowed() -> Bool {
         if !opened && access == kIOHIDAccessTypeGranted {
-            opened = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+            let r = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            opened = r == kIOReturnSuccess
+            lumenLog("keyboard: open manager -> 0x\(String(r, radix: 16))")
         }
         return opened
     }
+
+    // what went wrong last time, so the log shows a change instead of a line every 20 s
+    private var lastProblem = ""
 
     private func name(_ d: IOHIDDevice) -> String {
         IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? ""
@@ -329,7 +344,13 @@ final class KeyboardLight {
     }
 
     func apply() {
-        guard openIfAllowed() else { return }
+        guard openIfAllowed() else {
+            let problem = "keyboard: no Input Monitoring (access \(access.rawValue)), lights not sent"
+            if problem != lastProblem { lumenLog(problem) }
+            lastProblem = problem
+            return
+        }
+        var results: [String] = []
         for d in devices {
             guard let els = IOHIDDeviceCopyMatchingElements(d, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else { continue }
             for e in els where IOHIDElementGetUsagePage(e) == UInt32(kHIDPage_LEDs) {
@@ -339,8 +360,110 @@ final class KeyboardLight {
                 case kHIDUsage_LED_ScrollLock: on = bits.scroll
                 default:                       continue
                 }
-                IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
+                let r = IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
+                if r != kIOReturnSuccess { results.append("\(name(d)) led \(IOHIDElementGetUsage(e)) -> 0x\(String(r, radix: 16))") }
             }
+        }
+        let problem = devices.isEmpty ? "keyboard: none connected" : results.joined(separator: "; ")
+        if problem != lastProblem {
+            lumenLog(problem.isEmpty ? "keyboard: lights sent to \(names.joined(separator: ", ")) num=\(bits.num) scroll=\(bits.scroll)" : problem)
+        }
+        lastProblem = problem
+    }
+}
+
+// Brightness per state and the "whole keyboard breathes" switch go to the keyboard over its USB raw HID
+// (VIA) interface — the wireless module forwards only the lock bits, so this works while the cable is in.
+// The keyboard stores them, so they keep applying over Bluetooth and 2.4G.
+//   'L' 'M' 0x01 <working> <done> <needs you> <flags>  →  echoed back with the stored values, byte 7 = version
+final class KeyboardSettings {
+    enum Sync { case noCable, synced, oldFirmware, pending }
+
+    private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    private var opened = false
+    private var buffers: [UnsafeMutablePointer<UInt8>] = []
+    private var pending: [UInt8]?
+    private var lastSent = Date.distantPast
+    private(set) var status = Sync.noCable
+    var currentPayload: (() -> [UInt8])?     // levels and flags, read fresh each time
+    var nameMatch = "NuPhy"
+
+    init() {
+        let match = [kIOHIDDeviceUsagePageKey: 0xFF60, kIOHIDDeviceUsageKey: 0x61] as CFDictionary
+        IOHIDManagerSetDeviceMatching(manager, match)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { ctx, _, _, device in
+            let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
+            guard s.matches(device) else { return }
+            s.listen(device)
+            // a keyboard just plugged in: give it what was set while it was wireless
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { s.send(force: true) }
+        }, me)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { ctx, _, _, _ in
+            let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
+            DispatchQueue.main.async { if s.devices.isEmpty { s.status = .noCable } }
+        }, me)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    }
+
+    func start() {
+        guard !opened else { return }
+        opened = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+    }
+
+    private func matches(_ d: IOHIDDevice) -> Bool {
+        (IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? "").localizedCaseInsensitiveContains(nameMatch)
+    }
+
+    private var devices: [IOHIDDevice] {
+        guard let set = IOHIDManagerCopyDevices(manager) else { return [] }
+        var refs = [UnsafeRawPointer?](repeating: nil, count: CFSetGetCount(set))
+        CFSetGetValues(set, &refs)
+        return refs.compactMap { $0 }.map { Unmanaged<IOHIDDevice>.fromOpaque($0).takeUnretainedValue() }.filter(matches)
+    }
+
+    // replies tell us whether the firmware understood: ours echoes 'L' 'M', older firmware answers as VIA would
+    private func listen(_ device: IOHIDDevice) {
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
+        buffers.append(buf)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDDeviceRegisterInputReportCallback(device, buf, 64, { ctx, _, _, _, _, report, length in
+            let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
+            let ok = length >= 8 && report[0] == 0x4C && report[1] == 0x4D && report[7] >= 1
+            DispatchQueue.main.async { s.status = ok ? .synced : .oldFirmware }
+        }, me)
+    }
+
+    // called for every slider move: at most 20 writes a second, and the last value is never dropped
+    func send(force: Bool = false) {
+        guard let payload = currentPayload?() else { return }
+        pending = payload
+        let wait = 0.05 - Date().timeIntervalSince(lastSent)
+        if wait > 0 && !force {
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.flush() }
+            return
+        }
+        flush()
+    }
+
+    private func flush() {
+        guard let payload = pending else { return }
+        start()
+        let targets = devices
+        guard !targets.isEmpty else {
+            status = .noCable
+            return
+        }
+        pending = nil
+        lastSent = Date()
+        var report = [UInt8](repeating: 0, count: 32)
+        report[0] = 0x4C   // 'L'
+        report[1] = 0x4D   // 'M'
+        report[2] = 0x01
+        for (i, b) in payload.prefix(4).enumerated() { report[3 + i] = b }
+        if status != .synced { status = .pending }
+        for d in targets {
+            _ = IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, 0, report, report.count)
         }
     }
 }
@@ -368,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var animTimer: Timer?
     private let defaults = UserDefaults.standard
     private let keyboard = KeyboardLight()
+    private let keyboardSettings = KeyboardSettings()
 
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
@@ -382,7 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func style(_ light: Light) -> GlowStyle? { styles.first { $0.light == light } }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardSync": true,
+        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardSync": true, "keyboardKeysBreathe": false,
                                       "levelAttention": 1.0, "levelDone": 0.35, "levelWorking": 0.35])
         let menu = NSMenu()
         menu.delegate = self
@@ -391,6 +515,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
         setUpDot()
+        keyboardSettings.currentPayload = { [weak self] in self?.keyboardPayload() ?? [] }
+        keyboardSettings.start()
         refreshLoginItem()
         try? installHookScript()   // keep the installed hook in step with this version of the app
         tick()
@@ -401,6 +527,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let resend = Timer(timeInterval: 20, repeats: true) { [weak self] _ in self?.syncKeyboard(force: true) }
         RunLoop.main.add(resend, forMode: .common)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.offerHooksOnFirstRun() }
+    }
+
+    // levels in the keyboard's order: working, done, needs you; byte 4 bit0 = the whole keyboard breathes
+    private func keyboardPayload() -> [UInt8] {
+        let levels = [Light.working, .done, .attention].map { l -> UInt8 in
+            guard let st = style(l) else { return 255 }
+            return UInt8(max(0, min(255, (defaults.double(forKey: st.levelKey) * 255).rounded())))
+        }
+        return levels + [defaults.bool(forKey: "keyboardKeysBreathe") ? 1 : 0]
     }
 
     func applicationWillTerminate(_ note: Notification) {
@@ -602,6 +737,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.target = self
             mi.state = defaults.bool(forKey: "keyboardSync") ? .on : .off
             menu.addItem(mi)
+            let keys = NSMenuItem(title: L("整个键盘一起呼吸", "Whole keyboard breathes too"), action: #selector(toggleKeysBreathe), keyEquivalent: "")
+            keys.target = self
+            keys.state = defaults.bool(forKey: "keyboardKeysBreathe") ? .on : .off
+            menu.addItem(keys)
+            let note: String
+            switch keyboardSettings.status {
+            case .synced:      note = L("    亮度和开关已同步到键盘（插线时实时调整）", "    Brightness and switch synced (live while wired)")
+            case .oldFirmware: note = L("    键盘固件太旧，不支持调亮度，请更新固件", "    Keyboard firmware too old for these settings")
+            case .pending:     note = L("    正在同步到键盘…", "    Syncing to the keyboard…")
+            case .noCable:     note = L("    亮度和开关在插线时同步到键盘，拔线后照样生效", "    Brightness and switch sync while wired, then stay")
+            }
+            menu.addItem(disabled(note))
             if defaults.bool(forKey: "keyboardSync") && keyboard.access != kIOHIDAccessTypeGranted {
                 let ask = NSMenuItem(title: L("    需要“输入监控”权限，点此开启", "    Needs Input Monitoring — click to allow"),
                                      action: #selector(askKeyboardAccess), keyEquivalent: "")
@@ -653,6 +800,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sliderPreview = (light, Date().addingTimeInterval(1.5))
         updateGlow()
         updateAnimating()
+        keyboardSettings.send()
+    }
+
+    @objc private func toggleKeysBreathe() {
+        defaults.set(!defaults.bool(forKey: "keyboardKeysBreathe"), forKey: "keyboardKeysBreathe")
+        keyboardSettings.send(force: true)
     }
 
     @objc private func toggleKeyboard() {
