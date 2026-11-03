@@ -263,6 +263,41 @@ final class GlowView: NSView {
 }
 
 // A click-through, see-through window covering one screen, above everything including full-screen apps.
+// A display as the user knows it. The id is macOS's UUID for the panel, so a setting survives unplugging,
+// rearranging and restarts; screens with the same name get their position added.
+struct Display {
+    let id: String
+    let name: String
+    let builtIn: Bool
+    let screen: NSScreen
+
+    static var all: [Display] {
+        let raw = NSScreen.screens.compactMap { screen -> (String, String, Bool, NSScreen)? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() else { return nil }
+            let builtIn = CGDisplayIsBuiltin(number.uint32Value) != 0
+            let name = builtIn ? L("内建显示器", "Built-in display") : screen.localizedName
+            return (CFUUIDCreateString(nil, uuid) as String, name, builtIn, screen)
+        }.sorted { $0.3.frame.minX < $1.3.frame.minX }
+        return raw.map { id, name, builtIn, screen in
+            let twins = raw.filter { $0.1 == name }
+            var shown = name
+            if twins.count == 2 {
+                shown += twins[0].0 == id ? L("（左）", " (left)") : L("（右）", " (right)")
+            } else if twins.count > 2, let i = twins.firstIndex(where: { $0.0 == id }) {
+                shown += " \(i + 1)"
+            }
+            return Display(id: id, name: shown, builtIn: builtIn, screen: screen)
+        }
+    }
+}
+
+// displays the user switched the glow off on; anything not listed (including a newly connected display) glows
+var glowOffDisplays: Set<String> {
+    get { Set(UserDefaults.standard.stringArray(forKey: "glowOffDisplays") ?? []) }
+    set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "glowOffDisplays") }
+}
+
 final class GlowWindow: NSWindow {
     let glow: GlowView
 
@@ -472,13 +507,20 @@ final class KeyboardSettings {
 
 // MARK: - panel
 
+struct DisplayRow: Identifiable {
+    let id: String
+    let name: String
+    let builtIn: Bool
+    let on: Bool
+}
+
 struct AgentRow: Identifiable {
     let id: Int
     let name: String
     let status: AgentTarget.Status
 }
 
-enum PanelAction { case dismissDone, toggleAgent(Int), askKeyboardAccess, toggleLogin, quit }
+enum PanelAction { case dismissDone, toggleAgent(Int), toggleDisplay(String), askKeyboardAccess, toggleLogin, quit }
 
 // what the panel shows; the app delegate fills it in and carries out the actions
 final class PanelModel: ObservableObject {
@@ -490,6 +532,7 @@ final class PanelModel: ObservableObject {
     @Published var keyboardNeedsAccess = false
     @Published var agents: [AgentRow] = []
     @Published var openAtLogin = false
+    @Published var displays: [DisplayRow] = []
     @Published var height: CGFloat = 600   // fits the screen; the panel scrolls when its content is taller
     var changed: (String) -> Void = { _ in }
     var perform: (PanelAction) -> Void = { _ in }
@@ -515,6 +558,43 @@ struct PanelView: View {
     var body: some View {
         ScrollView(.vertical) { PanelContent(model: model, styles: styles, delays: delays) }
             .frame(width: panelWidth, height: model.height)
+    }
+}
+
+// lays its children out left to right, wrapping to a new line when the row is full
+struct FlowRow: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(subviews, width: proposal.width ?? .infinity)
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0,
+                      height: rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(subviews, width: bounds.width) {
+            var x = bounds.minX
+            for i in row.items {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private func arrange(_ subviews: Subviews, width: CGFloat) -> [(items: [Int], width: CGFloat, height: CGFloat)] {
+        var rows: [(items: [Int], width: CGFloat, height: CGFloat)] = []
+        for (i, view) in subviews.enumerated() {
+            let size = view.sizeThatFits(.unspecified)
+            if let last = rows.last, last.width + spacing + size.width <= width {
+                rows[rows.count - 1] = (last.items + [i], last.width + spacing + size.width, max(last.height, size.height))
+            } else {
+                rows.append(([i], size.width, size.height))
+            }
+        }
+        return rows
     }
 }
 
@@ -577,6 +657,10 @@ struct PanelContent: View {
             Divider()
             section(L("状态提示", "Status lights")) {
                 ForEach(styles, id: \.onKey) { stateRow($0).padding(.vertical, 6) }
+            }
+            if model.displays.count > 1 {
+                Divider()
+                displays
             }
             Divider()
             keyboard
@@ -673,6 +757,26 @@ struct PanelContent: View {
                 .padding(.leading, 18).padding(.top, 4)
             }
         }
+    }
+
+    private var displays: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                caption(L("屏幕边缘发光的显示器", "Displays that glow"))
+                info(L("选择在哪些显示器上显示屏幕边缘发光，对三种状态统一生效。\n未选的显示器不发光。拔掉再接上、重启电脑后，设置保持不变。\n仅在连接两台及以上显示器时显示此项。",
+                       "Choose which displays show the edge glow, for all three states.\nDisplays left off stay dark. The choice survives unplugging and restarts.\nShown only while two or more displays are connected."))
+            }
+            // wraps onto a second line when the names are long
+            FlowRow(spacing: 6) {
+                ForEach(model.displays) { d in
+                    Toggle(isOn: Binding(get: { d.on }, set: { _ in model.perform(.toggleDisplay(d.id)) })) {
+                        Label(d.name, systemImage: d.builtIn ? "laptopcomputer" : "display")
+                    }
+                    .toggleStyle(ChipToggleStyle())
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
     private var keyboardStatus: String {
@@ -944,7 +1048,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildWindows() {
         windows.forEach { $0.orderOut(nil) }
-        windows = NSScreen.screens.map { GlowWindow(screen: $0) }
+        let off = glowOffDisplays
+        windows = Display.all.filter { !off.contains($0.id) }.map { GlowWindow(screen: $0.screen) }
         glow = nil
     }
 
@@ -1110,6 +1215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return status == .absent ? nil : AgentRow(id: i, name: t.name, status: status)
         }
         panel.openAtLogin = FileManager.default.fileExists(atPath: loginAgentPath)
+        let off = glowOffDisplays
+        panel.displays = Display.all.map { DisplayRow(id: $0.id, name: $0.name, builtIn: $0.builtIn, on: !off.contains($0.id)) }
     }
 
     private func settingChanged(_ key: String) {
@@ -1148,6 +1255,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 writeLoginItem()
             }
+            refreshPanel()
+        case .toggleDisplay(let id):
+            var off = glowOffDisplays
+            if off.contains(id) { off.remove(id) } else { off.insert(id) }
+            glowOffDisplays = off
+            buildWindows()
+            tick()
             refreshPanel()
         case .quit:
             NSApp.terminate(nil)

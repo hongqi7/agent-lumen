@@ -29,6 +29,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 点击菜单栏图标打开设置面板。各项说明可将鼠标悬停在 ⓘ 上查看。
 
 - **显示位置**：每种状态右侧有「屏幕」「键盘」两个按钮，蓝色为已选。未选的位置在该状态下不亮灯；键盘未选时显示你原本设置的灯效。
+- **屏幕边缘发光的显示器**：连接两台及以上显示器时，面板中会列出每台显示器，可分别选择是否发光，对三种状态统一生效。设置按显示器记录，拔掉再接上、重启电脑后保持不变；新接入的显示器默认发光。
 - **亮度**：每种状态各有一个亮度滑块。拖动时，屏幕边缘立即按新亮度显示该颜色；键盘通过 USB 有线连接时同步调整。
 - **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。之后如有其他会话完成，绿光重新显示。绿光显示期间，面板顶部有「关闭屏幕绿光」按钮，可立即关闭。
   - 判断你是否在电脑前，只读取系统记录的「距上次操作的秒数」，不需要额外权限，不读取按键内容。
@@ -115,6 +116,7 @@ The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60
 
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
 - Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
+- With two or more displays, choose which of them glow; the choice is remembered per display.
 - Choose per state whether it shows on the screen edges, the keyboard, or both. Click the menu bar icon to open the settings panel.
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the panel lists every agent's sessions.
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
