@@ -2,8 +2,8 @@
 
 <h1 align="center">Agent Lumen · 灵光</h1>
 
-<p align="center">让 AI 编程助手的状态，化成屏幕边缘的一圈光。<br>
-A glow around your screen edge that tells you what your AI coding agents are doing.</p>
+<p align="center">让 AI 编程助手的状态，化成屏幕边缘的一圈光，也能点亮你的 NuPhy 键盘。<br>
+A glow around your screen edge, and on your NuPhy keyboard, that tells you what your AI coding agents are doing.</p>
 
 <p align="center"><a href="https://github.com/hongqi7/agent-lumen/releases/latest"><b>⬇︎ 下载 Download</b></a></p>
 
@@ -15,14 +15,16 @@ A glow around your screen edge that tells you what your AI coding agents are doi
 
 你让 Claude Code（或 WorkBuddy、Devin）去干活，自己切到别的窗口。Agent Lumen 会用颜色告诉你它现在什么情况，不用来回切窗口看：
 
-| 状态 | 状态栏光点 | 屏幕边缘 |
-|---|---|---|
-| 🔵 **等你批准**（权限确认、选择题） | 蓝色快速呼吸 | 蓝光呼吸（约 1.2 秒一次） |
-| 🟠 **任务中**（思考、调用工具） | 橙色呼吸 | 橙光呼吸（约 2 秒一次） |
-| 🟢 **完成任务** | 绿色呼吸 | 绿光呼吸（约 3 秒一次） |
-| 空闲 | 空心小圆圈 | 不亮 |
+| 状态 | 状态栏光点 / 屏幕边缘 / NuPhy 键盘 |
+|---|---|
+| 🔵 **等你批准**（权限确认、选择题） | 蓝光呼吸，约 1.2 秒一次 |
+| 🟠 **任务中**（思考、调用工具） | 橙光呼吸，约 2 秒一次 |
+| 🟢 **完成任务** | 绿光呼吸，约 3 秒一次 |
+| 空闲 | 状态栏是空心小圆圈；屏幕不亮；键盘恢复你自己的灯效 |
 
-- 三种光各有开关和**强弱滑块**（无极调节），拖动时实时预览。
+三处用的是同一条呼吸曲线（取自键盘固件），快慢、明暗范围完全一致。
+
+- 屏幕上三种光各有开关和**强弱滑块**（无极调节），拖动时实时预览；键盘灯亮度跟随键盘自己的侧灯亮度。
 - 同时开多个会话、多个工具也没问题：显示最紧急的那个（蓝 > 橙 > 绿），点开菜单能看到每个工具有几个会话、各是什么状态。
 - 屏幕边缘发光**不挡鼠标**，多块屏幕、全屏应用里都能看到。
 - 很省资源：只在有灯在动时刷新，实测 CPU 约 1%。不联网，不收集任何数据。
@@ -61,9 +63,14 @@ A glow around your screen edge that tells you what your AI coding agents are doi
   ```
 - 然后退出 App，删掉 `Agent Lumen.app`、`~/.agent-lumen`，开过开机自启的再删 `~/Library/LaunchAgents/io.github.hongqi7.agent-lumen.plist`。
 
-## 和键盘灯一起用
+## NuPhy 键盘灯
 
-如果你也在用 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light)（让 NuPhy 键盘侧灯显示同样的状态），Agent Lumen 会直接读键盘灯记录的状态，不会再重复加钩子，菜单里显示「已通过键盘灯接入」。
+Agent Lumen 也是 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) 的 Mac 端控制程序：给 NuPhy Air60 V2 / Halo65 V2 刷上那边的固件，键盘侧灯（Halo 是整圈光环）就会和屏幕一起亮，**共用同一套钩子**，颜色和呼吸节奏完全一致。
+
+- 原理：Mac 通过 macOS 用不到的 Num Lock / Scroll Lock 指示灯信号告诉键盘状态，有线、蓝牙、2.4G 都能传。
+- 菜单「键盘灯同步」可以开关；键盘断开重连（休眠醒来、切换模式）后会自动补发状态。
+- 第一次连上 NuPhy 键盘时，macOS 会请求「输入监控」权限：只有拿到这个权限，程序才能设置键盘指示灯。Agent Lumen **只写指示灯，不读任何按键**。授权后重开一次 App 生效。
+- 以前装过键盘灯项目自带钩子（`claude-light`）的，菜单里会提示「旧版键盘灯钩子」，点一下就换成共享钩子，并自动去掉旧的；键盘灯项目的后台程序也可以停掉了。
 
 ## 自己编译
 
@@ -94,6 +101,8 @@ You hand a task to Claude Code (or WorkBuddy, or Devin) and switch to another wi
 | 🟠 **Working**: thinking or running tools | orange, breathing |
 | 🟢 **Done** | green, slow breathing |
 
+The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
+
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the menu lists every agent's sessions.
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
@@ -106,6 +115,6 @@ You hand a task to Claude Code (or WorkBuddy, or Devin) and switch to another wi
 
 **Build:** `./build.sh` (needs only the Xcode command line tools). One source file, no dependencies.
 
-Works alongside [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light), which shows the same states on a NuPhy keyboard's side lights. Agent Lumen reads its state and does not add duplicate hooks.
+**NuPhy keyboard:** Agent Lumen is also the Mac-side controller for [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) (Air60 V2 and Halo65 V2 firmware). It signals the state through the Num Lock / Scroll Lock indicator bits, over USB, Bluetooth or 2.4G, and resends them after a reconnect. macOS asks for Input Monitoring the first time, which is required to set keyboard LEDs. The app never reads keystrokes. Older `claude-light` hooks are replaced with the shared ones when you connect.
 
 Not affiliated with Anthropic, Tencent or Cognition. MIT License.

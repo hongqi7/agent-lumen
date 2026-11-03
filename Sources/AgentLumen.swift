@@ -1,13 +1,16 @@
-// Agent Lumen (灵光): a menu bar light and a screen-edge glow that show what your AI coding agents
-// are doing — Claude Code, WorkBuddy and Devin. Blue: waiting for your approval. Orange: working.
-// Green: done. Each agent session reports its state through hooks (Resources/lumen-hook).
+// Agent Lumen (灵光): a menu bar light, a screen-edge glow and (optionally) NuPhy keyboard side lights
+// that show what your AI coding agents are doing — Claude Code, WorkBuddy and Devin.
+// Blue: waiting for your approval. Orange: working. Green: done.
+// Each agent session reports its state through hooks (Resources/lumen-hook); this app is the only reader.
 import AppKit
+import IOKit.hid
 import QuartzCore
 
 let home = ProcessInfo.processInfo.environment["AGENT_LUMEN_HOME"] ?? NSHomeDirectory()   // override for tests
 let lumenDir = home + "/.agent-lumen"
-// our own hook writes here; the NuPhy keyboard light (claude-light) writes the second folder
-let sessionDirs = [lumenDir + "/sessions", home + "/.claude/claude-light/sessions"]
+let lumenSessions = lumenDir + "/sessions"
+// written by the older standalone keyboard-light hooks (claude-light); read only while an agent still uses them
+let legacySessions = home + "/.claude/claude-light/sessions"
 let hookPath = lumenDir + "/lumen-hook"
 let staleSeconds: TimeInterval = 120 * 60   // a busy session silent for 2 hours was interrupted: count it as done
 let loginLabel = "io.github.hongqi7.agent-lumen"
@@ -54,12 +57,12 @@ struct Session {
     let light: Light
 }
 
-func readSessions() -> [Session] {
+func readSessions(includeLegacy: Bool) -> [Session] {
     let fm = FileManager.default
     let now = Date()
     var seen = Set<String>()
     var out: [Session] = []
-    for dir in sessionDirs {
+    for dir in includeLegacy ? [lumenSessions, legacySessions] : [lumenSessions] {
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { continue }
         for name in names where !name.hasPrefix(".") && seen.insert(name).inserted {
             let path = dir + "/" + name
@@ -77,9 +80,23 @@ func readSessions() -> [Session] {
     return out
 }
 
-// 0...1...0 once per period
+// One breath, 0 → 255 → 0: the table the NuPhy firmware uses, so screen and keyboard breathe alike
+let breatheTable: [UInt8] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 22, 24, 27, 30, 33, 36, 39, 42,
+    45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85, 89, 94, 99, 104, 109, 114, 119, 124, 129, 134, 140, 146, 152,
+    158, 164, 170, 176, 182, 188, 194, 200, 206, 213, 220, 227, 234, 241, 248, 255, 255, 248, 241, 234, 227, 220, 213, 206,
+    200, 194, 188, 182, 176, 170, 164, 158, 152, 146, 140, 134, 129, 124, 119, 114, 109, 104, 99, 94, 89, 85, 81, 77,
+    73, 69, 65, 61, 57, 53, 49, 45, 42, 39, 36, 33, 30, 27, 24, 22, 20, 18, 16, 14, 12, 10, 9, 8,
+    7, 6, 5, 4, 3, 2, 1, 0,
+]
+
+// 0...1...0 once per period, following breatheTable
 func wave(_ t: CFTimeInterval, _ period: Double) -> CGFloat {
-    CGFloat(0.5 - 0.5 * cos(2 * Double.pi * t / period))
+    let phase = t.truncatingRemainder(dividingBy: period) / period * Double(breatheTable.count)
+    let i = Int(phase) % breatheTable.count
+    let f = phase - phase.rounded(.down)
+    let v = Double(breatheTable[i]) * (1 - f) + Double(breatheTable[(i + 1) % breatheTable.count]) * f
+    return CGFloat(v / 255)
 }
 
 // MARK: - hooks
@@ -93,13 +110,13 @@ struct AgentTarget {
     let arg: String                          // session file prefix
     let events: [(event: String, state: String, matcher: String?)]
 
-    enum Status { case absent, off, lumen, keyboard }
+    enum Status { case absent, off, lumen, legacy }
 
     var status: Status {
         guard FileManager.default.fileExists(atPath: configDir) else { return .absent }
         let text = (try? String(contentsOfFile: settings, encoding: .utf8)) ?? ""
         if text.contains("lumen-hook") { return .lumen }
-        if text.contains("claude-light") { return .keyboard }   // already reporting through the keyboard light
+        if text.contains("claude-light") { return .legacy }   // the older standalone keyboard-light hooks
         return .off
     }
 }
@@ -120,7 +137,8 @@ let targets = [
 
 enum HookError: Error { case unreadable(String) }
 
-// Rewrites one settings file: drops earlier Lumen entries, then (when installing) puts ours first in
+// Rewrites one settings file: drops earlier Lumen entries and the older keyboard-light ones (this app drives
+// the keyboard now, so one set of hooks serves both), then (when installing) puts ours first in
 // each event so they never wait behind a slow hook. Backs the file up and keeps its permissions.
 func setHooks(_ t: AgentTarget, install: Bool) throws {
     let fm = FileManager.default
@@ -138,7 +156,7 @@ func setHooks(_ t: AgentTarget, install: Bool) throws {
     var hooks = root["hooks"] as? [String: Any] ?? [:]
     func isLumen(_ entry: Any) -> Bool {
         ((entry as? [String: Any])?["hooks"] as? [[String: Any]] ?? [])
-            .contains { ($0["command"] as? String ?? "").contains("lumen-hook") }
+            .contains { c in ["lumen-hook", "claude-light"].contains { (c["command"] as? String ?? "").contains($0) } }
     }
     for event in Array(hooks.keys) {
         let kept = (hooks[event] as? [Any] ?? []).filter { !isLumen($0) }
@@ -251,6 +269,82 @@ final class GlowWindow: NSWindow {
     }
 }
 
+// MARK: - keyboard
+
+// NuPhy keyboards running the claude-light firmware (github.com/hongqi7/nuphy-air60-v2-claude-light) read the
+// state from two indicator bits macOS never uses: Num Lock = working, Scroll Lock = done, both = needs you.
+// The bits travel over USB, Bluetooth and 2.4G alike. A reconnecting keyboard starts with them cleared,
+// so they are sent again when it shows up.
+final class KeyboardLight {
+    private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    private var opened = false
+    private var bits: (num: Bool, scroll: Bool) = (false, false)
+    var nameMatch: String { UserDefaults.standard.string(forKey: "keyboardName") ?? "NuPhy" }
+
+    init() {
+        let match = [kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop, kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard] as CFDictionary
+        IOHIDManagerSetDeviceMatching(manager, match)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { ctx, _, _, device in
+            let light = Unmanaged<KeyboardLight>.fromOpaque(ctx!).takeUnretainedValue()
+            guard light.matches(device) else { return }
+            // give the link a moment to settle before writing
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { light.apply() }
+        }, me)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    }
+
+    // reading device names needs no permission; writing the LEDs needs Input Monitoring
+    var access: IOHIDAccessType { IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) }
+
+    func requestAccess() { _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) }
+
+    private func openIfAllowed() -> Bool {
+        if !opened && access == kIOHIDAccessTypeGranted {
+            opened = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+        }
+        return opened
+    }
+
+    private func name(_ d: IOHIDDevice) -> String {
+        IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? ""
+    }
+
+    func matches(_ d: IOHIDDevice) -> Bool { name(d).localizedCaseInsensitiveContains(nameMatch) }
+
+    private var devices: [IOHIDDevice] {
+        guard let set = IOHIDManagerCopyDevices(manager) else { return [] }
+        var refs = [UnsafeRawPointer?](repeating: nil, count: CFSetGetCount(set))
+        CFSetGetValues(set, &refs)
+        return refs.compactMap { $0 }.map { Unmanaged<IOHIDDevice>.fromOpaque($0).takeUnretainedValue() }.filter(matches)
+    }
+
+    var names: [String] { Array(Set(devices.map(name))).sorted() }
+
+    func show(_ light: Light) {
+        let next = (num: light == .working || light == .attention, scroll: light == .done || light == .attention)
+        guard next != bits else { return }
+        bits = next
+        apply()
+    }
+
+    func apply() {
+        guard openIfAllowed() else { return }
+        for d in devices {
+            guard let els = IOHIDDeviceCopyMatchingElements(d, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else { continue }
+            for e in els where IOHIDElementGetUsagePage(e) == UInt32(kHIDPage_LEDs) {
+                let on: Bool
+                switch Int(IOHIDElementGetUsage(e)) {
+                case kHIDUsage_LED_NumLock:    on = bits.num
+                case kHIDUsage_LED_ScrollLock: on = bits.scroll
+                default:                       continue
+                }
+                IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
+            }
+        }
+    }
+}
+
 // MARK: - app
 
 struct GlowStyle {
@@ -273,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sliderPreview: (light: Light, until: Date)?
     private var animTimer: Timer?
     private let defaults = UserDefaults.standard
+    private let keyboard = KeyboardLight()
 
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
@@ -287,7 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func style(_ light: Light) -> GlowStyle? { styles.first { $0.light == light } }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true,
+        defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardSync": true,
                                       "levelAttention": 1.0, "levelDone": 0.35, "levelWorking": 0.35])
         let menu = NSMenu()
         menu.delegate = self
@@ -302,7 +397,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // .common: keep polling and animating while the menu is open
         let poll = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(poll, forMode: .common)
+        // a keyboard can drop the bits without reconnecting (sleep, mode switch): send them again now and then
+        let resend = Timer(timeInterval: 20, repeats: true) { [weak self] _ in self?.syncKeyboard(force: true) }
+        RunLoop.main.add(resend, forMode: .common)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.offerHooksOnFirstRun() }
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        keyboard.show(.idle)   // hand the side lights back to the keyboard's own effect
+    }
+
+    private var legacyHooksInUse: Bool { targets.contains { $0.status == .legacy } }
+
+    private func syncKeyboard(force: Bool = false) {
+        guard defaults.bool(forKey: "keyboardSync") else { return keyboard.show(.idle) }
+        if !keyboard.names.isEmpty, keyboard.access == kIOHIDAccessTypeUnknown, !defaults.bool(forKey: "askedKeyboardAccess") {
+            defaults.set(true, forKey: "askedKeyboardAccess")
+            keyboard.requestAccess()
+        }
+        keyboard.show(state)
+        if force { keyboard.apply() }
     }
 
     private func buildWindows() {
@@ -324,11 +438,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func tick() {
-        sessions = readSessions()
+        sessions = readSessions(includeLegacy: legacyHooksInUse)
         state = sessions.map(\.light).max() ?? .idle
         if state != shownState {
             shownState = state
             showDot()
+            syncKeyboard()
         }
         updateGlow()
         updateAnimating()
@@ -430,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        sessions = readSessions()
+        sessions = readSessions(includeLegacy: legacyHooksInUse)
 
         let byAgent = Dictionary(grouping: sessions, by: \.agent)
         if byAgent.isEmpty {
@@ -466,16 +581,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if status == .absent { continue }
             let text: String
             switch status {
-            case .lumen:    text = L("已接入", "connected")
-            case .keyboard: text = L("已通过键盘灯接入", "connected via keyboard light")
-            default:        text = L("未接入，点击接入", "not connected — click to connect")
+            case .lumen:  text = L("已接入", "connected")
+            case .legacy: text = L("用的是旧版键盘灯钩子，点击换成共享钩子", "old keyboard-light hooks — click to switch")
+            default:      text = L("未接入，点击接入", "not connected — click to connect")
             }
             let mi = NSMenuItem(title: "\(t.name)\(L("：", ": "))\(text)", action: #selector(toggleHooks(_:)), keyEquivalent: "")
             mi.target = self
             mi.tag = i
-            mi.state = status == .off ? .off : .on
-            mi.isEnabled = status != .keyboard
+            mi.state = status == .lumen ? .on : .off
             menu.addItem(mi)
+        }
+
+        menu.addItem(.separator())
+        let names = keyboard.names
+        if names.isEmpty {
+            menu.addItem(disabled(L("键盘灯：没有连接 NuPhy 键盘", "Keyboard light: no NuPhy keyboard connected")))
+        } else {
+            let mi = NSMenuItem(title: L("键盘灯同步：", "Keyboard light: ") + names.joined(separator: L("、", ", ")),
+                                action: #selector(toggleKeyboard), keyEquivalent: "")
+            mi.target = self
+            mi.state = defaults.bool(forKey: "keyboardSync") ? .on : .off
+            menu.addItem(mi)
+            if defaults.bool(forKey: "keyboardSync") && keyboard.access != kIOHIDAccessTypeGranted {
+                let ask = NSMenuItem(title: L("    需要“输入监控”权限，点此开启", "    Needs Input Monitoring — click to allow"),
+                                     action: #selector(askKeyboardAccess), keyEquivalent: "")
+                ask.target = self
+                menu.addItem(ask)
+            }
         }
 
         menu.addItem(.separator())
@@ -523,6 +655,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateAnimating()
     }
 
+    @objc private func toggleKeyboard() {
+        defaults.set(!defaults.bool(forKey: "keyboardSync"), forKey: "keyboardSync")
+        syncKeyboard(force: true)
+    }
+
+    // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
+    @objc private func askKeyboardAccess() {
+        keyboard.requestAccess()
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+    }
+
     @objc private func toggleOption(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         defaults.set(!defaults.bool(forKey: key), forKey: key)
@@ -554,7 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func offerHooksOnFirstRun() {
         guard !defaults.bool(forKey: "offeredHooks") else { return }
-        let candidates = targets.filter { $0.status == .off }
+        let candidates = targets.filter { $0.status == .off || $0.status == .legacy }
         guard !candidates.isEmpty else { return }
         defaults.set(true, forKey: "offeredHooks")
         NSApp.activate(ignoringOtherApps: true)
@@ -614,8 +757,8 @@ if args.contains("--connect") || args.contains("--disconnect") {
     if install { try? installHookScript() }
     for t in targets {
         let s = t.status
-        guard s == .off || s == .lumen, install || s == .lumen else {
-            print("\(t.name): \(s == .absent ? "not installed" : s == .keyboard ? "uses the keyboard light hooks" : "already connected")")
+        guard s != .absent, install || s == .lumen else {
+            print("\(t.name): \(s == .absent ? "not installed" : "not connected")")
             continue
         }
         do {

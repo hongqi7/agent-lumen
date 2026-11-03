@@ -4,7 +4,7 @@
 #   ./build.sh install    -> also copy the app to /Applications and open it
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$HERE/build"
 APP="$BUILD/Agent Lumen.app"
