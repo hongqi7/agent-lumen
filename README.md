@@ -25,6 +25,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 三处用的是同一条呼吸曲线（取自键盘固件），快慢、明暗范围完全一致。
 
 - 屏幕上三种光各有开关和**强弱滑块**（无极调节），拖动时实时预览；键盘灯亮度跟随键盘自己的侧灯亮度。
+- **绿光看到就灭**：任务完成时你不在电脑前，屏幕绿光一直等你；你一动鼠标或键盘，再亮 8 秒就慢慢淡出，不会一直在屏幕边上打扰你。键盘和状态栏小圆点保持绿色，直到下一个任务。等多久可以在菜单里选（一动就灭 / 8 秒 / 30 秒 / 一直亮），也可以点「知道了」马上熄灭。有新的会话完成时，屏幕绿光会重新亮起。判断你在不在只看「距上次操作多少秒」，不读按键内容。
 - 同时开多个会话、多个工具也没问题：显示最紧急的那个（蓝 > 橙 > 绿），点开菜单能看到每个工具有几个会话、各是什么状态。
 - 屏幕边缘发光**不挡鼠标**，多块屏幕、全屏应用里都能看到。
 - 很省资源：只在有灯在动时刷新，实测 CPU 约 1%。不联网，不收集任何数据。
@@ -68,7 +69,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 Agent Lumen 也是 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) 的 Mac 端控制程序：给 NuPhy Air60 V2 / Halo65 V2 刷上那边的固件，键盘侧灯（Halo 是整圈光环）就会和屏幕一起亮，**共用同一套钩子**，颜色和呼吸节奏完全一致。
 
 - 原理：Mac 通过 macOS 用不到的 Num Lock / Scroll Lock 指示灯信号告诉键盘状态，有线、蓝牙、2.4G 都能传。
-- 菜单「键盘灯同步」可以开关；键盘断开重连（休眠醒来、切换模式）后会自动补发状态。
+- 菜单「键盘灯同步」可以开关，下面还能分别勾选哪几种状态显示在键盘上（比如屏幕显示「任务中」、键盘不显示）；不显示的状态，键盘就是你自己的灯效。键盘断开重连（休眠醒来、切换模式）后会自动补发状态。
 - **亮度滑块也管键盘**：插着线时拖滑块，键盘侧灯亮度实时跟着变。
 - **整个键盘一起呼吸**（菜单里单独的开关）：按键背光也换成状态色，跟着一起呼吸。
 - 这两项要在**插 USB 线**时同步到键盘（键盘的无线模块只转发指示灯信号）。键盘会记住设置，拔线后走蓝牙 / 2.4G 照样生效；无线时在 App 里改的设置，下次插线自动同步。需要键盘固件是 2026-11-03 之后的版本。
@@ -109,6 +110,8 @@ You hand a task to Claude Code (or WorkBuddy, or Devin) and switch to another wi
 The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
 
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
+- Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the menu). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
+- Choose per state whether it shows on the keyboard as well as the screen.
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the menu lists every agent's sessions.
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
 

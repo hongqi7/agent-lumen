@@ -55,6 +55,7 @@ enum Light: Int, Comparable {
 struct Session {
     let agent: String
     let light: Light
+    let changed: Date      // when the hook last wrote this state
 }
 
 func readSessions(includeLegacy: Bool) -> [Session] {
@@ -74,7 +75,7 @@ func readSessions(includeLegacy: Bool) -> [Session] {
             if light > .done && now.timeIntervalSince(mtime) > staleSeconds { light = .done }
             let agent = name.hasPrefix("workbuddy-") ? "WorkBuddy"
                       : name.hasPrefix("devin-") ? "Devin" : "Claude Code"
-            out.append(Session(agent: agent, light: light))
+            out.append(Session(agent: agent, light: light, changed: mtime))
         }
     }
     return out
@@ -473,9 +474,15 @@ final class KeyboardSettings {
 struct GlowStyle {
     let light: Light
     let title: String
-    let onKey: String
+    let onKey: String          // shown on the screen edges
+    let keyboardKey: String    // shown on the keyboard
     let levelKey: String
     let period: Double
+}
+
+// seconds since the last keyboard or mouse input anywhere; needs no permission and reads no keys
+func secondsSinceInput() -> TimeInterval {
+    CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -487,6 +494,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var state = Light.idle
     private var shownState: Light?
     private var glow: Light?            // the colour currently breathing on the screen edges
+    private var fadeStart: CFTimeInterval?   // the screen glow is fading out
+    private var keyboardState: Light?   // what the keyboard was last told
+    // done on the screen goes dark once you have been back for a while; the keyboard and menu bar keep it
+    private var doneSeenThrough = Date.distantPast   // done states written up to here have been seen
+    private var doneShown: (stamp: Date, at: Date)?  // the newest done state and when it appeared
+    private var backSince: Date?                     // first input after it appeared
     private var sliderPreview: (light: Light, until: Date)?
     private var animTimer: Timer?
     private let defaults = UserDefaults.standard
@@ -496,10 +509,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
     private let styles = [
-        GlowStyle(light: .attention, title: L("等你批准：蓝光呼吸", "Needs you: blue"), onKey: "glowAttention", levelKey: "levelAttention", period: 1.2),
-        GlowStyle(light: .done, title: L("完成任务：绿光呼吸", "Done: green"), onKey: "glowDone", levelKey: "levelDone", period: 3.0),
-        GlowStyle(light: .working, title: L("任务中：橙光呼吸", "Working: orange"), onKey: "glowWorking", levelKey: "levelWorking", period: 2.0),
+        GlowStyle(light: .attention, title: L("等你批准：蓝光呼吸", "Needs you: blue"), onKey: "glowAttention", keyboardKey: "keyboardAttention",
+                  levelKey: "levelAttention", period: 1.2),
+        GlowStyle(light: .done, title: L("完成任务：绿光呼吸", "Done: green"), onKey: "glowDone", keyboardKey: "keyboardDone",
+                  levelKey: "levelDone", period: 3.0),
+        GlowStyle(light: .working, title: L("任务中：橙光呼吸", "Working: orange"), onKey: "glowWorking", keyboardKey: "keyboardWorking",
+                  levelKey: "levelWorking", period: 2.0),
     ]
+    // how long the screen keeps green after you are back: 0 = at once, -1 = until the next task
+    private let doneDelays: [(seconds: Double, title: String)] = [
+        (0, L("你一动就熄灭", "as soon as you're back")),
+        (8, L("你回来 8 秒后熄灭", "8 seconds after you're back")),
+        (30, L("你回来 30 秒后熄灭", "30 seconds after you're back")),
+        (-1, L("一直亮到下一个任务", "until the next task")),
+    ]
+    private let fadeSeconds = 2.0
     private let minLevel = 0.22
     private let maxLevel = 1.0
 
@@ -507,6 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardSync": true, "keyboardKeysBreathe": false,
+                                      "keyboardAttention": true, "keyboardDone": true, "keyboardWorking": true, "doneScreenDelay": 8.0,
                                       "levelAttention": 1.0, "levelDone": 0.35, "levelWorking": 0.35])
         let menu = NSMenu()
         menu.delegate = self
@@ -544,14 +569,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var legacyHooksInUse: Bool { targets.contains { $0.status == .legacy } }
 
+    // the most urgent state among those switched on for a place (screen or keyboard)
+    private func strongest(_ allowed: (GlowStyle) -> Bool) -> Light? {
+        sessions.map(\.light).filter { l in style(l).map(allowed) ?? false }.max()
+    }
+
     private func syncKeyboard(force: Bool = false) {
-        guard defaults.bool(forKey: "keyboardSync") else { return keyboard.show(.idle) }
-        if !keyboard.names.isEmpty, keyboard.access == kIOHIDAccessTypeUnknown, !defaults.bool(forKey: "askedKeyboardAccess") {
+        let want = defaults.bool(forKey: "keyboardSync") ? strongest { self.defaults.bool(forKey: $0.keyboardKey) } ?? .idle : .idle
+        guard force || want != keyboardState else { return }
+        keyboardState = want
+        if want != .idle, !keyboard.names.isEmpty, keyboard.access == kIOHIDAccessTypeUnknown, !defaults.bool(forKey: "askedKeyboardAccess") {
             defaults.set(true, forKey: "askedKeyboardAccess")
             keyboard.requestAccess()
         }
-        keyboard.show(state)
+        keyboard.show(want)
         if force { keyboard.apply() }
+    }
+
+    // false once you have been back at the computer for the chosen time since the newest done state appeared
+    private func doneOnScreen() -> Bool {
+        guard let newest = sessions.filter({ $0.light == .done }).map(\.changed).max(), newest > doneSeenThrough else {
+            doneShown = nil
+            backSince = nil
+            return false
+        }
+        let now = Date()
+        if doneShown?.stamp != newest {
+            doneShown = (newest, now)
+            backSince = nil
+        }
+        let delay = defaults.double(forKey: "doneScreenDelay")
+        if delay < 0 { return true }
+        if backSince == nil, let shown = doneShown, now.addingTimeInterval(-secondsSinceInput()) > shown.at {
+            backSince = now
+        }
+        if let back = backSince, now.timeIntervalSince(back) >= delay {
+            doneSeenThrough = newest
+            lumenLog("screen: done seen, green glow off")
+            return false
+        }
+        return true
     }
 
     private func buildWindows() {
@@ -578,8 +635,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if state != shownState {
             shownState = state
             showDot()
-            syncKeyboard()
         }
+        syncKeyboard()
         updateGlow()
         updateAnimating()
     }
@@ -607,9 +664,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var want: Light?
         if let p = sliderPreview, Date() < p.until {
             want = p.light
-        } else if let st = style(state), defaults.bool(forKey: st.onKey) {
-            want = state
+        } else {
+            let done = doneOnScreen()
+            want = strongest { self.defaults.bool(forKey: $0.onKey) && ($0.light != .done || done) }
         }
+        if want == nil, glow != nil {
+            // fade out instead of switching off at once
+            if fadeStart == nil { fadeStart = CACurrentMediaTime() }
+            if CACurrentMediaTime() - fadeStart! < fadeSeconds { return }
+        }
+        fadeStart = nil
         guard want != glow else { return }
         glow = want
         guard let want else {
@@ -651,8 +715,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         guard let glow, let st = style(glow) else { return }
         let top = CGFloat(defaults.double(forKey: st.levelKey))
-        let level = top * (0.35 + 0.65 * wave(t, st.period))
+        var level = top * (0.35 + 0.65 * wave(t, st.period))
+        if let f = fadeStart { level *= CGFloat(max(0, 1 - (t - f) / fadeSeconds)) }
         windows.forEach { $0.glow.setLevel(level) }
+        if let f = fadeStart, t - f >= fadeSeconds { updateGlow() }
     }
 
     // hollow ring that follows the menu bar's light/dark look
@@ -707,6 +773,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.image = menuDot(st.light)
             menu.addItem(mi)
             menu.addItem(sliderItem(st))
+            if st.light == .done { menu.addItem(doneDelayItem()) }
+        }
+        if glow == .done && fadeStart == nil && sliderPreview == nil {
+            let ok = NSMenuItem(title: L("知道了，屏幕上的绿光先灭掉", "Got it — turn off the green glow"), action: #selector(dismissDone), keyEquivalent: "")
+            ok.target = self
+            menu.addItem(ok)
         }
 
         menu.addItem(.separator())
@@ -737,6 +809,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.target = self
             mi.state = defaults.bool(forKey: "keyboardSync") ? .on : .off
             menu.addItem(mi)
+            if defaults.bool(forKey: "keyboardSync") {
+                for st in styles {
+                    let k = NSMenuItem(title: L("    键盘显示", "    Show on keyboard: ") + st.light.label, action: #selector(toggleOption(_:)), keyEquivalent: "")
+                    k.target = self
+                    k.representedObject = st.keyboardKey
+                    k.state = defaults.bool(forKey: st.keyboardKey) ? .on : .off
+                    k.image = menuDot(st.light)
+                    menu.addItem(k)
+                }
+            }
             let keys = NSMenuItem(title: L("整个键盘一起呼吸", "Whole keyboard breathes too"), action: #selector(toggleKeysBreathe), keyEquivalent: "")
             keys.target = self
             keys.state = defaults.bool(forKey: "keyboardKeysBreathe") ? .on : .off
@@ -791,6 +873,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mi = NSMenuItem()
         mi.view = box
         return mi
+    }
+
+    private func doneDelayItem() -> NSMenuItem {
+        let current = defaults.double(forKey: "doneScreenDelay")
+        let title = doneDelays.first { $0.seconds == current }?.title ?? doneDelays[1].title
+        let mi = NSMenuItem(title: L("    屏幕绿光：", "    Screen green: ") + title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for d in doneDelays {
+            let o = NSMenuItem(title: d.title, action: #selector(setDoneDelay(_:)), keyEquivalent: "")
+            o.target = self
+            o.representedObject = d.seconds
+            o.state = d.seconds == current ? .on : .off
+            sub.addItem(o)
+        }
+        sub.addItem(.separator())
+        sub.addItem(disabled(L("键盘和状态栏的绿色会一直保持到下一个任务", "The keyboard and menu bar stay green until the next task")))
+        mi.submenu = sub
+        return mi
+    }
+
+    @objc private func setDoneDelay(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Double else { return }
+        defaults.set(seconds, forKey: "doneScreenDelay")
+        tick()
+    }
+
+    @objc private func dismissDone() {
+        if let newest = sessions.filter({ $0.light == .done }).map(\.changed).max() { doneSeenThrough = newest }
+        tick()
     }
 
     // dragging shows that colour breathing at the new strength for a moment
