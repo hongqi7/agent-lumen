@@ -551,16 +551,34 @@ final class PanelModel: ObservableObject {
 
 let panelWidth: CGFloat = 340
 
-// the panel's own dark look, so the lights in the preview stand out
+// a colour for light mode and one for dark mode; the panel follows the system unless the user picks one
+private func dyn(_ light: UInt32, _ la: CGFloat = 1, _ dark: UInt32, _ da: CGFloat = 1) -> Color {
+    func c(_ hex: UInt32, _ a: CGFloat) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: a)
+    }
+    return Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? c(dark, da) : c(light, la) })
+}
+
+// the panel's palette: light grey and white cards in light mode, near-black in dark mode
 enum Ink {
-    static let text = Color(red: 0.95, green: 0.93, blue: 0.91)
-    static let muted = text.opacity(0.55)
-    static let faint = text.opacity(0.35)
-    static let card = Color.white.opacity(0.05)
-    static let cardOn = Color.white.opacity(0.12)
-    static let line = Color.white.opacity(0.08)
-    static let back = Color(red: 0.114, green: 0.110, blue: 0.122)
-    static let rim = Color(red: 0.227, green: 0.220, blue: 0.239)
+    static let text = dyn(0x1D1D1F, 1, 0xF2EEE9, 1)
+    static let muted = dyn(0x1D1D1F, 0.58, 0xF2EEE9, 0.55)
+    static let faint = dyn(0x1D1D1F, 0.38, 0xF2EEE9, 0.35)
+    static let card = dyn(0x000000, 0.04, 0xFFFFFF, 0.05)
+    static let cardOn = dyn(0xFFFFFF, 1, 0xFFFFFF, 0.12)
+    static let line = dyn(0x000000, 0.08, 0xFFFFFF, 0.08)
+    static let list = dyn(0xFFFFFF, 1, 0xFFFFFF, 0.04)
+    static let shadow = dyn(0x000000, 0.06, 0x000000, 0)
+    static let back = dyn(0xF6F6F8, 1, 0x1D1C1F, 1)
+    static let rim = dyn(0xC7C7CC, 1, 0x3A383D, 1)
+    // the preview
+    static let stageTop = dyn(0xECECF0, 1, 0x2A282C, 1)
+    static let stageBottom = dyn(0xDCDCE2, 1, 0x161518, 1)
+    static let screen = dyn(0x1C1C1E, 1, 0x0E0E10, 1)
+    static let window = dyn(0xF2F2F5, 1, 0x1F1E22, 1)
+    static let windowLine = dyn(0xD8D8DE, 1, 0x2E2C31, 1)
+    static let keyboard = dyn(0xE4E4E9, 1, 0x2A282D, 1)
+    static let key = dyn(0xC9C9CF, 1, 0x45434A, 1)
 }
 
 struct PanelView: View {
@@ -572,7 +590,6 @@ struct PanelView: View {
         ScrollView(.vertical) { PanelContent(model: model, styles: styles, delays: delays) }
             .frame(width: panelWidth, height: model.height)
             .background(Ink.back)
-            .preferredColorScheme(.dark)
     }
 }
 
@@ -621,17 +638,17 @@ struct LightPreview: View {
             let color = Color(nsColor: style.light.color)
             ZStack {
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(RadialGradient(colors: [Color(red: 0.165, green: 0.157, blue: 0.173), Color(red: 0.086, green: 0.082, blue: 0.094)],
+                    .fill(RadialGradient(colors: [Ink.stageTop, Ink.stageBottom],
                                          center: .init(x: 0.5, y: 0.3), startRadius: 0, endRadius: 200))
                 VStack(spacing: 0) {
                     // screen
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.055, green: 0.055, blue: 0.063))
-                        RoundedRectangle(cornerRadius: 4).fill(Color(red: 0.122, green: 0.118, blue: 0.133))
+                        RoundedRectangle(cornerRadius: 8).fill(Ink.screen)
+                        RoundedRectangle(cornerRadius: 4).fill(Ink.window)
                             .padding(.horizontal, 16).padding(.vertical, 14)
                         VStack(alignment: .leading, spacing: 7) {
                             ForEach(0..<3) { i in
-                                Capsule().fill(Color.white.opacity(0.08)).frame(width: i == 2 ? 60 : 90, height: 5)
+                                Capsule().fill(Ink.windowLine).frame(width: i == 2 ? 60 : 90, height: 5)
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -646,16 +663,16 @@ struct LightPreview: View {
                         RoundedRectangle(cornerRadius: 8).strokeBorder(Ink.rim, lineWidth: 2)
                     }
                     .frame(width: 180, height: 104)
-                    RoundedRectangle(cornerRadius: 3).fill(Color(red: 0.173, green: 0.165, blue: 0.184)).frame(width: 40, height: 10)
+                    RoundedRectangle(cornerRadius: 3).fill(Ink.rim).frame(width: 40, height: 10)
                     // keyboard
                     ZStack {
-                        RoundedRectangle(cornerRadius: 5).fill(Color(red: 0.165, green: 0.157, blue: 0.176))
+                        RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard)
                         VStack(spacing: 2) {
                             ForEach(0..<3) { _ in
                                 HStack(spacing: 3) {
                                     ForEach(0..<11) { _ in
                                         RoundedRectangle(cornerRadius: 1)
-                                            .fill(onKeyboard && wholeKeyboard ? color.opacity(0.25 + 0.75 * a) : Color(red: 0.27, green: 0.26, blue: 0.29))
+                                            .fill(onKeyboard && wholeKeyboard ? color.opacity(0.25 + 0.75 * a) : Ink.key)
                                             .frame(width: 9, height: 3)
                                     }
                                 }
@@ -746,7 +763,8 @@ struct PanelContent: View {
                     .foregroundColor(sel ? Ink.text : Ink.muted)
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
                     .background(RoundedRectangle(cornerRadius: 9).fill(sel ? Ink.cardOn : Ink.card))
-                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(sel ? Color.white.opacity(0.14) : .clear, lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(sel ? Ink.line : .clear, lineWidth: 0.5))
+                    .shadow(color: sel ? Ink.shadow : .clear, radius: 1, y: 0.5)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -767,7 +785,8 @@ struct PanelContent: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 12).fill(on ? Ink.cardOn : Ink.card))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.line, lineWidth: 0.5))
+            .shadow(color: on ? Ink.shadow : .clear, radius: 1, y: 0.5)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -801,7 +820,8 @@ struct PanelContent: View {
                         Text(d.title).font(.system(size: 11))
                             .foregroundColor(sel ? Ink.text : Ink.muted)
                             .frame(maxWidth: .infinity).padding(.vertical, 5)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(sel ? Color.white.opacity(0.16) : Ink.card))
+                            .background(RoundedRectangle(cornerRadius: 8).fill(sel ? Ink.cardOn : Ink.card))
+                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(sel ? Ink.line : .clear, lineWidth: 0.5))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -907,6 +927,22 @@ struct PanelContent: View {
                 }
             }
             Divider().overlay(Ink.line)
+            row("circle.lefthalf.filled", L("外观", "Appearance"),
+                info: L("设置面板的配色。跟随系统时，随 macOS 的浅色或深色外观自动切换。\n不影响屏幕边缘发光、键盘灯和菜单栏图标。",
+                        "The settings panel's colours. Follow System switches with macOS light or dark appearance.\nThe glow, keyboard and menu bar icon are not affected.")) {
+                let current = UserDefaults.standard.string(forKey: "appearance") ?? "system"
+                let options = [("system", L("跟随系统", "Follow System")), ("light", L("浅色", "Light")), ("dark", L("深色", "Dark"))]
+                valueMenu(options.first { $0.0 == current }?.1 ?? options[0].1) {
+                    ForEach(options, id: \.0) { key, title in
+                        Toggle(title, isOn: Binding(get: { current == key }, set: { _ in
+                            model.objectWillChange.send()
+                            UserDefaults.standard.set(key, forKey: "appearance")
+                            model.changed("appearance")
+                        }))
+                    }
+                }
+            }
+            Divider().overlay(Ink.line)
             row("power", L("开机自动启动", "Open at login")) {
                 Toggle("", isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.mini)
@@ -924,8 +960,9 @@ struct PanelContent: View {
             }
             .buttonStyle(.plain).keyboardShortcut("q")
         }
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: 12).fill(Ink.list))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.line, lineWidth: 0.5))
+        .shadow(color: Ink.shadow, radius: 1, y: 0.5)
     }
 }
 
@@ -1006,7 +1043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.changed = { [weak self] key in self?.settingChanged(key) }
         panel.perform = { [weak self] action in self?.perform(action) }
         popover.behavior = .transient
-        popover.appearance = NSAppearance(named: .darkAqua)
+        applyAppearance()
         popover.contentViewController = NSHostingController(rootView: PanelView(model: panel, styles: styles, delays: doneDelays))
         item.button?.target = self
         item.button?.action = #selector(togglePanel)
@@ -1263,7 +1300,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.displays = Display.all.map { DisplayRow(id: $0.id, name: $0.name, builtIn: $0.builtIn, on: !off.contains($0.id)) }
     }
 
+    // nil follows the system's light or dark appearance
+    private func applyAppearance() {
+        switch UserDefaults.standard.string(forKey: "appearance") {
+        case "light": popover.appearance = NSAppearance(named: .aqua)
+        case "dark":  popover.appearance = NSAppearance(named: .darkAqua)
+        default:      popover.appearance = nil
+        }
+    }
+
     private func settingChanged(_ key: String) {
+        if key == "appearance" { return applyAppearance() }
         if let st = styles.first(where: { $0.levelKey == key }) {
             // dragging shows that colour breathing at the new strength for a moment
             sliderPreview = (st.light, Date().addingTimeInterval(1.5))

@@ -34,6 +34,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 - **亮度**：每种状态各有一个亮度。拖动滑块时，预览和屏幕边缘立即按新亮度显示；键盘通过 USB 有线连接时同步调整。
 - **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。之后如有其他会话完成，绿光重新显示。绿光显示期间，面板顶部有「关闭屏幕绿光」按钮，可立即关闭。
   - 判断你是否在电脑前，只读取系统记录的「距上次操作的秒数」，不需要额外权限，不读取按键内容。
+- **外观**：设置面板默认跟随系统，macOS 切换浅色或深色（夜间）外观时自动跟着变；也可在面板底部「外观」中固定为浅色或深色。只影响设置面板，不影响屏幕边缘发光、键盘灯和菜单栏图标。
 - **多个会话、多个助手同时运行**：显示其中优先级最高的状态，顺序为 待确认 > 执行中 > 已完成。面板顶部列出各助手的会话数量和状态。
 - 屏幕边缘的灯光**不拦截鼠标点击**，在多块屏幕、全屏应用中都会显示。
 - 资源占用很低：只在有灯光变化时刷新，实测 CPU 约 1%。不联网，不收集任何数据。
@@ -117,6 +118,7 @@ The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60
 
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
 - Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
+- The settings panel follows the system's light or dark appearance, or can be pinned to either.
 - With two or more displays, choose which of them glow; the choice is remembered per display.
 - Choose per state whether it shows on the screen edges, the keyboard, or both. Click the menu bar icon to open the settings panel.
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the panel lists every agent's sessions.
