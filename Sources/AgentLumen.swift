@@ -490,6 +490,7 @@ final class PanelModel: ObservableObject {
     @Published var keyboardNeedsAccess = false
     @Published var agents: [AgentRow] = []
     @Published var openAtLogin = false
+    @Published var height: CGFloat = 600   // fits the screen; the panel scrolls when its content is taller
     var changed: (String) -> Void = { _ in }
     var perform: (PanelAction) -> Void = { _ in }
 
@@ -504,7 +505,20 @@ final class PanelModel: ObservableObject {
     }
 }
 
+let panelWidth: CGFloat = 420
+
 struct PanelView: View {
+    @ObservedObject var model: PanelModel
+    let styles: [GlowStyle]
+    let delays: [(seconds: Double, title: String)]
+
+    var body: some View {
+        ScrollView(.vertical) { PanelContent(model: model, styles: styles, delays: delays) }
+            .frame(width: panelWidth, height: model.height)
+    }
+}
+
+struct PanelContent: View {
     @ObservedObject var model: PanelModel
     let styles: [GlowStyle]
     let delays: [(seconds: Double, title: String)]
@@ -513,34 +527,24 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            states.padding(16)
+            states.padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
-            keyboard.padding(16)
+            keyboard.padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
-            agents.padding(16)
+            agents.padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
             HStack {
-                Text(L("开机时自动打开", "Open at login"))
+                Toggle(L("开机时自动打开", "Open at login"),
+                       isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
+                    .toggleStyle(.checkbox)
                 Spacer()
-                Toggle("", isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
-                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                Button(L("退出 Agent Lumen", "Quit Agent Lumen")) { model.perform(.quit) }
+                    .keyboardShortcut("q").controlSize(.small)
             }
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            Divider()
-            Button { model.perform(.quit) } label: {
-                HStack {
-                    Text(L("退出 Agent Lumen", "Quit Agent Lumen"))
-                    Spacer()
-                    Text("⌘Q").foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).foregroundStyle(.secondary)
-            .keyboardShortcut("q")
             .padding(.horizontal, 16).padding(.vertical, 10)
         }
         .font(.system(size: 13))
-        .frame(width: 380)
+        .frame(width: panelWidth)
     }
 
     private func caption(_ text: String) -> some View {
@@ -588,7 +592,7 @@ struct PanelView: View {
                 Button(L("熄灭屏幕绿光", "Dismiss glow")) { model.perform(.dismissDone) }.controlSize(.small)
             }
         }
-        .padding(16)
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
     private func columnTitle(_ symbol: String, _ title: String) -> some View {
@@ -613,13 +617,13 @@ struct PanelView: View {
                 .padding(.top, 4)
             ForEach(Array(styles.enumerated()), id: \.offset) { i, st in
                 if i > 0 { Divider() }
-                stateRow(st).padding(.vertical, 12)
+                stateRow(st).padding(.vertical, 9)
             }
         }
     }
 
     private func stateRow(_ st: GlowStyle) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Circle().fill(Color(nsColor: st.light.color)).frame(width: 10, height: 10)
                 Text(st.light.label).font(.system(size: 13, weight: .medium))
@@ -627,11 +631,11 @@ struct PanelView: View {
                 toggle(st.onKey)
                 toggle(st.keyboardKey)
             }
-            VStack(alignment: .leading, spacing: 2) {
-                note(st.meaning, size: 12, secondary: true)
-                note(st.pattern)
-            }
-            .padding(.leading, 20)
+            // what it means, then how it looks, on one line
+            (Text(st.meaning).font(.system(size: 12)).foregroundColor(.secondary)
+                + Text("  ·  " + st.pattern).font(.system(size: 11)).foregroundColor(Color(nsColor: .tertiaryLabelColor)))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 20)
             HStack(spacing: 8) {
                 Text(L("亮度", "Brightness")).font(.system(size: 12)).foregroundStyle(.secondary)
                 Slider(value: model.double(st.levelKey), in: 0.22...1.0).controlSize(.small)
@@ -640,15 +644,15 @@ struct PanelView: View {
                     .frame(width: 38, alignment: .trailing)
             }
             .padding(.leading, 20)
-            if st.light == .done { doneDelay.padding(.leading, 20).padding(.top, 4) }
+            if st.light == .done { doneDelay.padding(.leading, 20).padding(.top, 2) }
         }
     }
 
     private var doneDelay: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L("屏幕上的绿光何时熄灭", "When the green glow leaves the screen")).font(.system(size: 13, weight: .medium))
-            note(L("任务完成时你不在电脑前，绿光会一直亮着。你回来后，只要移动鼠标或按下任意键，就按下面的时间熄灭：",
-                   "If you are away when a task finishes, the glow stays on. Once you move the mouse or press a key, it goes out after:"),
+            note(L("你不在电脑前时，绿光一直亮着；你回来后（移动鼠标或按下任意键），按所选时间熄灭：",
+                   "While you are away it stays on; once you move the mouse or press a key, it goes out after:"),
                  size: 12, secondary: true)
             Picker("", selection: model.double("doneScreenDelay")) {
                 ForEach(delays, id: \.seconds) { Text($0.title).tag($0.seconds) }
@@ -716,7 +720,7 @@ struct PanelView: View {
                     toggle("keyboardKeysBreathe")
                 }
                 .padding(.leading, 24)
-                note(L("亮度和「整块键盘一起亮」需在 USB 有线连接时写入键盘。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置。",
+                note(L("亮度和「整块键盘一起亮」在 USB 有线连接时写入键盘；改用蓝牙或 2.4G 无线连接后，键盘沿用最后一次写入的设置。",
                        "Brightness and the whole-keyboard switch are saved to the keyboard over USB. Over Bluetooth or 2.4G it keeps the last saved settings."))
                     .padding(.leading, 24)
             } else {
@@ -1071,6 +1075,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = item.button else { return }
         tick()
         refreshPanel()
+        // as tall as the content, but never taller than the screen; beyond that the panel scrolls
+        let natural = NSHostingView(rootView: PanelContent(model: panel, styles: styles, delays: doneDelays)).fittingSize.height
+        let room = (button.window?.screen ?? NSScreen.main).map { $0.visibleFrame.height - 24 } ?? natural
+        panel.height = min(natural, room)
+        popover.contentSize = NSSize(width: panelWidth, height: panel.height)
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
