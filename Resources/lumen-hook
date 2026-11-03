@@ -1,0 +1,24 @@
+#!/bin/bash
+# Agent Lumen hook: records one agent session's state for the menu bar app.
+#   lumen-hook working|done|attention|end [agent]     (hook JSON with session_id on stdin)
+# Called by Claude Code / WorkBuddy / Devin hooks. Must stay fast and never fail the hook:
+# in hook protocols exit code 2 means "block", so every path exits 0.
+
+DIR="$HOME/.agent-lumen/sessions"
+mkdir -p "$DIR"
+
+input=$(cat)
+# first match = the hook's own top-level session_id; tool input/output later in the JSON may contain others
+sid=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+[ -z "$sid" ] && exit 0
+[ -n "$2" ] && sid="$2-$sid"
+sid=${sid//\//_}
+
+case "$1" in
+    working|done|attention) echo "$1" > "$DIR/$sid" ;;
+    end) rm -f "$DIR/$sid" ;;
+esac
+
+# sessions closed without SessionEnd: forget them after a week
+find "$DIR" -type f -mmin +10080 -delete 2>/dev/null
+exit 0

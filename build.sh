@@ -1,0 +1,59 @@
+#!/bin/bash
+# Build "Agent Lumen.app" (universal: Apple silicon + Intel) and a release zip.
+#   ./build.sh            -> build/Agent Lumen.app, build/AgentLumen-<version>.zip
+#   ./build.sh install    -> also copy the app to /Applications and open it
+set -euo pipefail
+
+VERSION="1.0.0"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BUILD="$HERE/build"
+APP="$BUILD/Agent Lumen.app"
+
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+for arch in arm64 x86_64; do
+    swiftc -O -swift-version 5 -target "$arch-apple-macos13.0" \
+        -o "$BUILD/AgentLumen-$arch" "$HERE/Sources/AgentLumen.swift"
+done
+lipo -create -output "$APP/Contents/MacOS/AgentLumen" "$BUILD/AgentLumen-arm64" "$BUILD/AgentLumen-x86_64"
+rm -f "$BUILD"/AgentLumen-arm64 "$BUILD"/AgentLumen-x86_64
+
+cp "$HERE/Resources/AppIcon.icns" "$APP/Contents/Resources/"
+cp "$HERE/Resources/lumen-hook" "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/lumen-hook"
+
+cat > "$APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>io.github.hongqi7.agent-lumen</string>
+    <key>CFBundleName</key><string>Agent Lumen</string>
+    <key>CFBundleDisplayName</key><string>Agent Lumen</string>
+    <key>CFBundleExecutable</key><string>AgentLumen</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHumanReadableCopyright</key><string>MIT License</string>
+</dict>
+</plist>
+EOF
+codesign --force --sign - "$APP"
+
+ZIP="$BUILD/AgentLumen-$VERSION.zip"
+rm -f "$ZIP"
+(cd "$BUILD" && ditto -c -k --keepParent "Agent Lumen.app" "$ZIP")
+echo "built: $APP"
+echo "zip:   $ZIP"
+
+if [ "${1:-}" = "install" ]; then
+    pkill -x AgentLumen 2>/dev/null || true
+    rm -rf "/Applications/Agent Lumen.app"
+    cp -R "$APP" /Applications/
+    open "/Applications/Agent Lumen.app"
+    echo "installed: /Applications/Agent Lumen.app"
+fi
