@@ -20,7 +20,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 | 🔵 **待确认** | AI 助手正在等你批准操作或回答问题 | 蓝色呼吸灯，周期 1.2 秒 |
 | 🟠 **执行中** | AI 助手正在思考、运行命令或修改文件 | 橙色呼吸灯，周期 2 秒 |
 | 🟢 **已完成** | AI 助手已完成本轮任务，等你查看结果 | 绿色呼吸灯，周期 3 秒 |
-| 空闲 | 暂无进行中的任务 | 菜单栏显示 App 图标；屏幕边缘不亮；键盘恢复你原本设置的灯效 |
+| 空闲 | 暂无进行中的任务 | 菜单栏图标的光圈显示蓝、绿、橙三色，不呼吸；屏幕边缘不亮；键盘恢复你原本设置的灯效 |
 
 三个位置使用同一条明暗曲线（取自键盘固件），节奏完全一致。
 
@@ -67,7 +67,7 @@ Codex、Gemini CLI、Qoder、ZCode 是 v1.9.0 新增的，按各工具的官方�
    ```
 3. 打开后，App 会列出检测到的 AI 工具，询问是否连接，点「接入」。修改前会自动备份原配置文件（文件名为 `*.bak-agent-lumen-时间戳`，保留最早的一份和最近的四份）。App 只改文件里的 `hooks` 一段，其余内容、键的顺序和注释都不动；`hooks` 一段里的注释不会保留。配置文件是软链接时，链接保持不变，改动写入它指向的文件。
 4. 连接前已经打开的会话，需要重新打开后才会触发灯光。
-5. 菜单栏出现 App 小图标即表示 App 正在运行，图标里的屏幕边框随状态变色并呼吸。点击它可打开设置面板。
+5. 菜单栏出现一个黑色显示器小图标即表示 App 正在运行。屏幕里有一圈光，平时是蓝、绿、橙三色，有任务时变成状态色并呼吸。菜单栏偏深或是彩色时屏幕半透明，以融入底栏。点击它可打开设置面板。
 
 > 菜单栏图标较多时，新图标可能被 Bartender、Ice 等工具折叠，请把它拖出来。
 
@@ -124,7 +124,7 @@ You hand a task to Claude Code, Codex, Gemini CLI or another agent and switch to
 | 🟠 **Working**: thinking or running tools | orange, breathing |
 | 🟢 **Done** | green, slow breathing |
 
-The menu bar icon (the app icon, whose screen edge takes the state's colour), the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
+The menu bar icon (a monitor with a glowing ring inside, which takes the state's colour; its screen is black on a light bar and see-through on a dark or coloured one), the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
 
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
 - Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard has the same choice on its own timer, set to never by default. The menu bar stays green until the next task. Presence is read from the system idle time only, never from keystrokes.

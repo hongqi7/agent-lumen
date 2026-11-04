@@ -3,6 +3,7 @@
 // Blue: waiting for your approval. Orange: working. Green: done.
 // Each agent session reports its state through hooks (Resources/lumen-hook); this app is the only reader.
 import AppKit
+import CoreImage
 import IOKit.hid
 import QuartzCore
 import SwiftUI
@@ -531,19 +532,36 @@ struct DoneWatch {
 
 // MARK: - menu bar icon
 
-// The app icon at menu bar size. Numbers are in the 1024-point space of scripts/make-icon.swift, enlarged so the
-// tile fills the icon. Idle shows the icon's own three-colour screen edge; a state turns the edge its colour.
+// A black monitor with a glowing ring inside its screen: the app icon's three colours when idle, a state's colour when
+// busy. The frame and stand are a template image, so macOS tints them for a light or dark bar and the monitor never
+// melts into a dark one. The screen and ring sit on top in layers, so the ring can breathe without image redraws.
+// Next to white icons (a dark or coloured bar) the screen is see-through, so it darkens the bar's colour instead of
+// covering it. Next to black icons (a light bar) it stays solid: there a see-through screen only looks grey.
 enum MenuBarIcon {
     static let size: CGFloat = 18
-    private static let inset: CGFloat = 0.5
-    private static let scale = (size - inset * 2) / 824
-    private static func p(_ v: CGFloat) -> CGFloat { (v - 100) * scale + inset }
-    private static func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
-        CGRect(x: p(x), y: p(y), width: w * scale, height: h * scale)
-    }
-    private static let screen = rect(232, 300, 560, 410)
-    private static let screenPath = CGPath(roundedRect: screen, cornerWidth: 1.2, cornerHeight: 1.2, transform: nil)
-    private static let edgeWidth: CGFloat = 1.4
+    // all on the 2x pixel grid once stroked
+    private static let frameWidth: CGFloat = 1
+    private static let framePath = CGPath(roundedRect: CGRect(x: 1, y: 5, width: 16, height: 11), cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
+    private static let screen = CGPath(roundedRect: CGRect(x: 1.5, y: 5.5, width: 15, height: 10), cornerWidth: 2, cornerHeight: 2, transform: nil)
+    private static let ring = CGPath(roundedRect: CGRect(x: 3, y: 7, width: 12, height: 7), cornerWidth: 1.25, cornerHeight: 1.25, transform: nil)
+    private static let ringWidth: CGFloat = 1
+
+    static let body: NSImage = {
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
+            guard let c = NSGraphicsContext.current?.cgContext else { return false }
+            c.setStrokeColor(NSColor.black.cgColor)
+            c.setFillColor(NSColor.black.cgColor)
+            c.addPath(framePath)
+            c.setLineWidth(frameWidth)
+            c.strokePath()
+            c.fill(CGRect(x: 8, y: 3.5, width: 2, height: 1))
+            c.addPath(CGPath(roundedRect: CGRect(x: 5, y: 2.25, width: 8, height: 1.5), cornerWidth: 0.75, cornerHeight: 0.75, transform: nil))
+            c.fillPath()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 
     private static func render(_ draw: (CGContext) -> Void) -> CGImage {
         let c = CGContext(data: nil, width: Int(size * 2), height: Int(size * 2), bitsPerComponent: 8, bytesPerRow: 0,
@@ -553,92 +571,93 @@ enum MenuBarIcon {
         return c.makeImage()!
     }
 
-    // the tile, the dark screen and its stand
-    static let base = render { c in
-        let tile = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
-        let radius = 185 * scale
-        c.addPath(CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil))
-        c.clip()
-        let bg = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            colors: [NSColor(srgbRed: 0.10, green: 0.11, blue: 0.17, alpha: 1).cgColor,
-                                     NSColor(srgbRed: 0.03, green: 0.04, blue: 0.07, alpha: 1).cgColor] as CFArray,
-                            locations: [0, 1])!
-        c.drawLinearGradient(bg, start: CGPoint(x: 0, y: size), end: .zero, options: [])
-        c.addPath(screenPath)
-        c.setFillColor(NSColor(srgbRed: 0.05, green: 0.06, blue: 0.10, alpha: 1).cgColor)
+    static let blackScreen = render { c in
+        c.addPath(screen)
+        c.setFillColor(NSColor(white: 0.04, alpha: 1).cgColor)
         c.fillPath()
-        c.setFillColor(NSColor(white: 0.55, alpha: 0.9).cgColor)
-        c.fill(rect(470, 222, 84, 78))
-        c.fill(rect(392, 180, 240, 42))
     }
 
-    // the screen edge in the blue → green → orange of the app icon
-    static let idleEdge = render { c in
-        c.addPath(screenPath)
-        c.setLineWidth(edgeWidth)
-        c.replacePathWithStrokedPath()
-        c.clip()
+    private static func stroked(width: CGFloat, _ paint: (CGContext) -> Void) -> CGImage {
+        render { c in
+            c.addPath(ring)
+            c.setLineWidth(width)
+            c.replacePathWithStrokedPath()
+            c.clip()
+            paint(c)
+        }
+    }
+
+    // a wider ring blurred, kept inside the screen
+    private static func blurred(_ paint: (CGContext) -> Void) -> CGImage {
+        let wide = CIImage(cgImage: stroked(width: 2, paint))
+        let soft = wide.clampedToExtent().applyingGaussianBlur(sigma: 2.5).cropped(to: wide.extent)
+        guard let image = CIContext().createCGImage(soft, from: soft.extent) else { return wide.cgImage ?? stroked(width: 2, paint) }
+        return render { c in
+            c.addPath(screen)
+            c.clip()
+            c.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+        }
+    }
+
+    private static func solid(_ color: NSColor) -> (CGContext) -> Void {
+        { c in c.setFillColor(color.cgColor); c.fill(CGRect(x: 0, y: 0, width: size, height: size)) }
+    }
+
+    // blue → green → orange, as in the app icon
+    private static func threeColours(_ c: CGContext) {
         let colors = [Light.attention, .done, .working].map(\.color.cgColor)
         let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: colors as CFArray, locations: [0, 0.5, 1])!
-        c.drawLinearGradient(grad, start: CGPoint(x: screen.minX, y: screen.maxY), end: CGPoint(x: screen.maxX, y: screen.minY), options: [])
+        c.drawLinearGradient(grad, start: CGPoint(x: 3, y: 14), end: CGPoint(x: 15, y: 7), options: [])
     }
 
-    static func edge(_ color: NSColor) -> CGImage {
-        render { c in
-            c.addPath(screenPath)
-            c.setLineWidth(edgeWidth)
-            c.setStrokeColor(color.cgColor)
-            c.strokePath()
-        }
-    }
-
-    // the colour spilling onto the screen and around it
-    static func glow(_ color: NSColor) -> CGImage {
-        render { c in
-            c.addPath(screenPath)
-            c.setFillColor(color.withAlphaComponent(0.3).cgColor)
-            c.fillPath()
-            c.setShadow(offset: .zero, blur: 3, color: color.cgColor)
-            c.addPath(screenPath)
-            c.setLineWidth(edgeWidth)
-            c.setStrokeColor(color.cgColor)
-            c.strokePath()
-        }
-    }
+    static func ring(_ light: Light) -> CGImage { stroked(width: ringWidth, light == .idle ? threeColours : solid(light.color)) }
+    static func glow(_ light: Light) -> CGImage { blurred(light == .idle ? threeColours : solid(light.color)) }
 }
 
-// Sits on the status item's button and lets its clicks through. In layers, so it can breathe without image redraws.
+// Sits on the status item's button and lets its clicks through.
 final class MenuBarIconView: NSView {
-    private let base = CALayer()
-    private let edge = CALayer()
+    private let black = CALayer()
     private let glow = CALayer()
+    private let ring = CALayer()
+    private var onDarkBar: Bool?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         // layer before wantsLayer = a layer-hosting view: AppKit leaves our layer tree alone
         layer = CALayer()
         wantsLayer = true
-        base.contents = MenuBarIcon.base
-        for l in [base, glow, edge] {
+        black.contents = MenuBarIcon.blackScreen
+        for l in [black, glow, ring] {
             l.contentsScale = 2
             l.contentsGravity = .resize
             l.frame = CGRect(x: 0, y: 0, width: MenuBarIcon.size, height: MenuBarIcon.size)
             layer!.addSublayer(l)
         }
-        show(.idle)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    // Called from the app's timer, not viewDidChangeEffectiveAppearance: when the bar changes, macOS renders the item
+    // in light and dark over and over, and that callback fires dozens of times with both. The timer reads it at rest.
+    func followBar() {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua, .vibrantLight, .vibrantDark]).map { [.darkAqua, .vibrantDark].contains($0) } ?? false
+        guard dark != onDarkBar else { return }
+        onDarkBar = dark
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        black.opacity = dark ? 0.4 : 1
+        CATransaction.commit()
+        lumenLog("menu bar: \(dark ? "dark, screen see-through" : "light, screen solid")")
+    }
+
     func show(_ light: Light) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let lit = light != .idle
-        edge.contents = lit ? MenuBarIcon.edge(light.color) : MenuBarIcon.idleEdge
-        glow.contents = lit ? MenuBarIcon.glow(light.color) : nil
-        edge.opacity = 1
+        ring.contents = MenuBarIcon.ring(light)
+        glow.contents = MenuBarIcon.glow(light)
+        ring.opacity = 1
         glow.opacity = 1
         CATransaction.commit()
     }
@@ -647,7 +666,7 @@ final class MenuBarIconView: NSView {
     func breathe(_ level: CGFloat) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        edge.opacity = Float(0.35 + 0.65 * level)
+        ring.opacity = Float(0.35 + 0.65 * level)
         glow.opacity = Float(level)
         CATransaction.commit()
     }
@@ -1756,6 +1775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func setUpIcon() {
         guard let button = item.button else { return }
+        button.image = MenuBarIcon.body
         iconView.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(iconView)
         NSLayoutConstraint.activate([iconView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
@@ -1765,6 +1785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func tick() {
+        iconView.followBar()
         sessions = readSessions(includeLegacy: legacyHooksInUse)
         // the first report from an agent proves the user has approved its hooks there
         for t in targets where t.needsTrust && sessions.contains(where: { $0.agent == t.name }) {
