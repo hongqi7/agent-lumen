@@ -174,11 +174,16 @@ struct AgentTarget {
     }
 }
 
+// Claude Code tools that wait for your answer inside the call, so no permission event reports it. PermissionRequest
+// isn't used: nothing follows an approval until the tool ends, so a long command would stay blue while it runs.
+let claudeToolsThatAsk = "^(AskUserQuestion|ExitPlanMode|mcp__computer-use__request_(access|full_control|teach_access))$"
+
 // the order the panel lists them in
 let targets = [
     AgentTarget(name: "Claude Code", configDir: home + "/.claude", settings: home + "/.claude/settings.json", arg: "",
-                events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", "*"),
-                         ("PreToolUse", "attention", "AskUserQuestion"), ("Notification", "attention", "permission_prompt"),
+                events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", "*"), ("PostToolUseFailure", "working", nil),
+                         ("PreToolUse", "attention", claudeToolsThatAsk),
+                         ("Notification", "attention", "permission_prompt|elicitation_dialog|elicitation_url_dialog"),
                          ("Stop", "done", nil), ("SessionEnd", "end", nil)]),
     // SessionEnd and Interrupt allow 3 seconds at most. Stopping a turn is neither work nor a finished task: back to idle
     AgentTarget(name: "Codex", configDir: home + "/.codex", settings: home + "/.codex/hooks.json", arg: "codex",
@@ -327,6 +332,33 @@ func backUpSettings(_ realFile: String, settings: String, keepNewest: Int = 4) {
     for name in backups[1..<(backups.count - keepNewest)] { try? fm.removeItem(atPath: dir + "/" + name) }
 }
 
+private func isLumenEntry(_ entry: Any) -> Bool {
+    ((entry as? [String: Any])?["hooks"] as? [[String: Any]] ?? [])
+        .contains { c in ["lumen-hook", "claude-light"].contains { (c["command"] as? String ?? "").contains($0) } }
+}
+
+private func hookCommand(_ t: AgentTarget, state: String) -> String {
+    "\"\(hookPath)\" \(state) \(t.arg)".trimmingCharacters(in: .whitespaces)
+}
+
+// whether a connected agent's hooks differ from what this version of the app would write
+func hooksOutdated(_ t: AgentTarget) -> Bool {
+    guard let data = FileManager.default.contents(atPath: t.settings), let root = parseSettings(data) else { return false }
+    let container = root["hooks"] as? [String: Any] ?? [:]
+    let hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
+    var found: [String] = []
+    for (event, value) in hooks {
+        for entry in value as? [Any] ?? [] where isLumenEntry(entry) {
+            let e = entry as? [String: Any] ?? [:]
+            for c in e["hooks"] as? [[String: Any]] ?? [] {
+                found.append("\(event)|\(e["matcher"] as? String ?? "")|\(c["command"] as? String ?? "")")
+            }
+        }
+    }
+    let wanted = t.events.map { "\($0.event)|\($0.matcher ?? "")|\(hookCommand(t, state: $0.state))" }
+    return found.sorted() != wanted.sorted()
+}
+
 // Rewrites one settings file: drops earlier Lumen entries and the older keyboard-light ones (this app drives
 // the keyboard now, so one set of hooks serves both), then (when installing) puts ours first in
 // each event so they never wait behind a slow hook. Backs the file up and keeps its permissions.
@@ -344,20 +376,16 @@ func setHooks(_ t: AgentTarget, install: Bool) throws {
     }
     var container = root["hooks"] as? [String: Any] ?? [:]
     var hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
-    func isLumen(_ entry: Any) -> Bool {
-        ((entry as? [String: Any])?["hooks"] as? [[String: Any]] ?? [])
-            .contains { c in ["lumen-hook", "claude-light"].contains { (c["command"] as? String ?? "").contains($0) } }
-    }
     // only event lists: "hooks" can also hold an agent's own settings, such as "enabled"
     for event in Array(hooks.keys) {
         guard let list = hooks[event] as? [Any] else { continue }
-        let kept = list.filter { !isLumen($0) }
+        let kept = list.filter { !isLumenEntry($0) }
         hooks[event] = kept.isEmpty ? nil : kept
     }
     if install {
         for e in t.events {
             var entry: [String: Any] = ["hooks": [["type": "command",
-                                                   "command": "\"\(hookPath)\" \(e.state) \(t.arg)".trimmingCharacters(in: .whitespaces),
+                                                   "command": hookCommand(t, state: e.state),
                                                    "timeout": t.timeout]]]
             if let m = e.matcher { entry["matcher"] = m }
             hooks[e.event] = [entry] + (hooks[e.event] as? [Any] ?? [])
@@ -1682,6 +1710,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         keyboardSettings.start()
         refreshLoginItem()
         try? installHookScript()   // keep the installed hook in step with this version of the app
+        // and the hooks of connected agents, so an update's new ones reach people who connected earlier
+        for t in targets where t.status == .lumen && hooksOutdated(t) {
+            do {
+                try setHooks(t, install: true)
+                lumenLog("\(t.name): hooks updated")
+            } catch {
+                lumenLog("\(t.name): hooks not updated, \(error)")
+            }
+        }
         tick()
         // .common: keep polling and animating while the menu is open
         let poll = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
