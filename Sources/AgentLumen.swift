@@ -386,10 +386,32 @@ final class GlowWindow: NSWindow {
 // state from two indicator bits macOS never uses: Num Lock = working, Scroll Lock = done, both = needs you.
 // The bits travel over USB, Bluetooth and 2.4G alike. A reconnecting keyboard starts with them cleared,
 // so they are sent again when it shows up.
+
+// Firmware before protocol 3 doesn't understand the Compose and Kana bits, and most of it drops the whole LED report
+// when it sees them, which would freeze the status lights over Bluetooth. So they go only to keyboards whose
+// USB reply proved they're new enough.
+let liveKeysKey = "keyboardsWithLiveKeys"
+func keyboardFamily(_ name: String) -> String {   // the same keyboard as "X", "X-1" and "X Dongle"
+    name.replacingOccurrences(of: #"(-\d+| Dongle)$"#, with: "", options: .regularExpression)
+}
+func hasLiveKeys(_ name: String) -> Bool {
+    (UserDefaults.standard.stringArray(forKey: liveKeysKey) ?? []).contains(keyboardFamily(name))
+}
+
+// what a keyboard with protocol 3 is told: the state, and the live choices for its keys and top lights
+struct KeyboardLive: Equatable {
+    var light = Light.idle
+    var compose = false       // keys and halo ring show the state
+    var kana = false          // the top left strip shows the state
+    var num: Bool { light == .working || light == .attention }
+    var scroll: Bool { light == .done || light == .attention }
+}
+
 final class KeyboardLight {
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
     private var opened = false
     private var bits: (num: Bool, scroll: Bool) = (false, false)
+    private var live = KeyboardLive()
     var nameMatch: String { UserDefaults.standard.string(forKey: "keyboardName") ?? "NuPhy" }
 
     init() {
@@ -437,10 +459,11 @@ final class KeyboardLight {
 
     var names: [String] { Array(Set(devices.map(name))).sorted() }
 
-    func show(_ light: Light) {
+    func show(_ light: Light, live nextLive: KeyboardLive = KeyboardLive()) {
         let next = (num: light == .working || light == .attention, scroll: light == .done || light == .attention)
-        guard next != bits else { return }
+        guard next != bits || nextLive != live else { return }
         bits = next
+        live = nextLive
         apply()
     }
 
@@ -454,11 +477,14 @@ final class KeyboardLight {
         var results: [String] = []
         for d in devices {
             guard let els = IOHIDDeviceCopyMatchingElements(d, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else { continue }
+            let isLive = hasLiveKeys(name(d))
             for e in els where IOHIDElementGetUsagePage(e) == UInt32(kHIDPage_LEDs) {
                 let on: Bool
                 switch Int(IOHIDElementGetUsage(e)) {
-                case kHIDUsage_LED_NumLock:    on = bits.num
-                case kHIDUsage_LED_ScrollLock: on = bits.scroll
+                case kHIDUsage_LED_NumLock:    on = isLive ? live.num : bits.num
+                case kHIDUsage_LED_ScrollLock: on = isLive ? live.scroll : bits.scroll
+                case kHIDUsage_LED_Compose where isLive: on = live.compose
+                case kHIDUsage_LED_Kana where isLive:    on = live.kana
                 default:                       continue
                 }
                 let r = IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
@@ -487,6 +513,7 @@ final class KeyboardSettings {
     private var lastSent = Date.distantPast
     private(set) var status = Sync.noCable
     var currentPayload: (() -> [UInt8])?     // levels and flags, read fresh each time
+    var liveKeysChanged: (() -> Void)?
     var nameMatch = "NuPhy"
 
     init() {
@@ -531,8 +558,22 @@ final class KeyboardSettings {
         IOHIDDeviceRegisterInputReportCallback(device, buf, 64, { ctx, _, _, _, _, report, length in
             let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
             let ok = length >= 8 && report[0] == 0x4C && report[1] == 0x4D && report[7] >= 1
-            DispatchQueue.main.async { s.status = ok ? .synced : .oldFirmware }
+            let version = ok ? report[7] : 0
+            DispatchQueue.main.async {
+                s.status = ok ? .synced : .oldFirmware
+                s.note(version: version)
+            }
         }, me)
+    }
+
+    private func note(version: UInt8) {
+        let defaults = UserDefaults.standard
+        let before = Set(defaults.stringArray(forKey: liveKeysKey) ?? [])
+        let here = Set(devices.map { keyboardFamily(IOHIDDeviceGetProperty($0, kIOHIDProductKey as CFString) as? String ?? "") })
+        let after = version >= 3 ? before.union(here) : before.subtracting(here)
+        guard after != before else { return }
+        defaults.set(Array(after).sorted(), forKey: liveKeysKey)
+        liveKeysChanged?()
     }
 
     // called for every slider move: at most 20 writes a second, and the last value is never dropped
@@ -595,6 +636,7 @@ final class PanelModel: ObservableObject {
     @Published var keyboardName: String?
     @Published var keyboardSync = KeyboardSettings.Sync.noCable
     @Published var keyboardNeedsAccess = false
+    @Published var keyboardLiveKeys = false   // its key lights can be switched over wireless
     @Published var agents: [AgentRow] = []
     @Published var onAgentsPage = false
     @Published var absentAgentsOpen = false
@@ -700,6 +742,7 @@ struct LightPreview: View {
     let onScreen: Bool
     let onKeyboard: Bool
     let wholeKeyboard: Bool
+    let liveKeyboard: Bool     // new firmware: the top lights and the keys with the ring are switched apart
 
     var body: some View {
         TimelineView(.animation) { context in
@@ -735,34 +778,63 @@ struct LightPreview: View {
                     .frame(width: 180, height: 104)
                     RoundedRectangle(cornerRadius: 3).fill(Ink.rim).frame(width: 40, height: 10)
                     // keyboard
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard)
-                        VStack(spacing: 2) {
-                            ForEach(0..<3) { _ in
-                                HStack(spacing: 3) {
-                                    ForEach(0..<11) { _ in
-                                        RoundedRectangle(cornerRadius: 1)
-                                            .fill(onKeyboard && wholeKeyboard ? color.opacity(0.25 + 0.75 * a) : Ink.key)
-                                            .frame(width: 9, height: 3)
-                                    }
-                                }
-                            }
-                        }
-                        HStack {
-                            Capsule().fill(onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim).frame(width: 3)
-                            Spacer()
-                            Capsule().fill(onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim).frame(width: 3)
-                        }
-                        .padding(.vertical, 3).padding(.horizontal, 2)
-                        .shadow(color: onKeyboard ? color.opacity(a) : .clear, radius: 5)
-                        RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.rim, lineWidth: 1)
-                    }
-                    .frame(width: 150, height: 22)
-                    .padding(.top, 10)
+                    if liveKeyboard { liveKeyboardView(color: color, a: a) } else { sideLightsKeyboardView(color: color, a: a) }
                 }
             }
         }
         .frame(height: 178)
+    }
+
+    private func keyRows(_ lit: Bool, _ color: Color, _ a: Double) -> some View {
+        VStack(spacing: 2) {
+            ForEach(0..<3) { _ in
+                HStack(spacing: 3) {
+                    ForEach(0..<11) { _ in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(lit ? color.opacity(0.25 + 0.75 * a) : Ink.key)
+                            .frame(width: 9, height: 3)
+                    }
+                }
+            }
+        }
+    }
+
+    // the strip at the top left; the keys and the ring around them
+    private func liveKeyboardView(color: Color, a: Double) -> some View {
+        let top = onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim
+        return VStack(spacing: 3) {
+            HStack {
+                Capsule().fill(top).frame(width: 14, height: 2.5)
+                Spacer()
+            }
+            .shadow(color: onKeyboard ? color.opacity(a) : .clear, radius: 3)
+            keyRows(wholeKeyboard, color, a)
+                .padding(3)
+                .overlay(RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(wholeKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim, lineWidth: 1))
+                .shadow(color: wholeKeyboard ? color.opacity(a) : .clear, radius: 4)
+        }
+        .padding(5)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard))
+        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.rim, lineWidth: 1))
+        .padding(.top, 8)
+    }
+
+    private func sideLightsKeyboardView(color: Color, a: Double) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard)
+            keyRows(onKeyboard && wholeKeyboard, color, a)
+            HStack {
+                Capsule().fill(onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim).frame(width: 3)
+                Spacer()
+                Capsule().fill(onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim).frame(width: 3)
+            }
+            .padding(.vertical, 3).padding(.horizontal, 2)
+            .shadow(color: onKeyboard ? color.opacity(a) : .clear, radius: 5)
+            RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.rim, lineWidth: 1)
+        }
+        .frame(width: 150, height: 22)
+        .padding(.top, 10)
     }
 }
 
@@ -819,7 +891,8 @@ struct PanelContent: View {
                 agentsPage
             } else {
                 LightPreview(style: st, level: UserDefaults.standard.double(forKey: st.levelKey),
-                             onScreen: isOn(st.onKey), onKeyboard: isOn(st.keyboardKey), wholeKeyboard: isOn("keyboardKeysBreathe"))
+                             onScreen: isOn(st.onKey), onKeyboard: isOn(st.keyboardKey), wholeKeyboard: isOn("keyboardKeysBreathe"),
+                             liveKeyboard: model.keyboardLiveKeys)
                 tabs.padding(.top, 12)
                 Text(st.help.replacingOccurrences(of: "\n", with: chinese ? "" : " "))
                     .font(.system(size: 12)).foregroundColor(Ink.muted)
@@ -827,10 +900,12 @@ struct PanelContent: View {
                     .padding(.top, 10).padding(.horizontal, 2)
                 HStack(spacing: 8) {
                     tile(L("屏幕边缘", "Screen"), "display", st.onKey)
-                    tile(L("键盘侧灯", "Side lights"), "keyboard", st.keyboardKey)
-                    // one setting in the keyboard's firmware, and it lights only along with the side lights
+                    tile(L("键盘呼吸灯", "Top lights"), "keyboard", st.keyboardKey)
+                    // new firmware: the keys and the ring, dark when off. Older firmware: the keys only, lit along
+                    // with the side lights, and off leaves the keyboard's own key effect showing
                     tile(L("按键背光", "Key lights"), "square.grid.3x2", "keyboardKeysBreathe",
-                         needs: isOn(st.keyboardKey) ? nil : L("需开侧灯", "Side lights off"))
+                         needs: model.keyboardLiveKeys || isOn(st.keyboardKey) ? nil : L("需开呼吸灯", "Top lights off"),
+                         off: model.keyboardLiveKeys ? nil : L("不变色", "Own effect"))
                 }
                 .padding(.top, 10)
                 brightness.padding(.top, 12)
@@ -867,14 +942,14 @@ struct PanelContent: View {
     }
 
     // `needs`: why this switch can't take effect right now
-    private func tile(_ title: String, _ symbol: String, _ key: String, needs: String? = nil) -> some View {
+    private func tile(_ title: String, _ symbol: String, _ key: String, needs: String? = nil, off: String? = nil) -> some View {
         let on = needs == nil && isOn(key)
         return Button { model.bool(key).wrappedValue.toggle() } label: {
             VStack(spacing: 4) {
                 Image(systemName: symbol).font(.system(size: 16)).foregroundColor(on ? accent : Ink.muted)
                     .frame(height: 20)   // symbols differ in height; keep the titles on one line
                 Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1).padding(.top, 2)
-                Text(needs ?? (on ? L("发光", "On") : L("不发光", "Off"))).font(.system(size: 11)).lineLimit(1)
+                Text(needs ?? (on ? L("发光", "On") : off ?? L("不发光", "Off"))).font(.system(size: 11)).lineLimit(1)
                     .foregroundColor(on ? Ink.text.opacity(0.75) : Ink.faint)
             }
             .foregroundColor(on ? Ink.text : Ink.muted)
@@ -954,7 +1029,9 @@ struct PanelContent: View {
         case .synced:      return L("USB 连接 · 设置已写入", "USB · settings saved")
         case .pending:     return L("USB 连接 · 正在写入", "USB · saving")
         case .oldFirmware: return L("固件需更新", "firmware update needed")
-        case .noCable:     return L("无线连接", "wireless")
+        case .noCable:
+            return model.keyboardLiveKeys ? L("无线连接 · 亮度插 USB 后写入", "wireless · brightness saves over USB")
+                                          : L("无线连接 · 亮度和按键背光插 USB 后写入", "wireless · settings save over USB")
         }
     }
 
@@ -1001,7 +1078,10 @@ struct PanelContent: View {
             }
             if let name = model.keyboardName {
                 row("keyboard", name, keyboardStatus,
-                    info: L("亮度与按键背光需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。",
+                    info: model.keyboardLiveKeys
+                        ? L("亮度需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。键盘呼吸灯和按键背光在无线连接时也可立即切换。",
+                            "Brightness is saved to the keyboard over USB and stays in effect over Bluetooth or 2.4G. Top lights and key lights switch right away over wireless too.")
+                        : L("亮度与按键背光需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。",
                             "Brightness and key lights are saved to the keyboard over USB, and stay in effect over Bluetooth or 2.4G.")) { EmptyView() }
                 if model.keyboardNeedsAccess {
                     row("exclamationmark.triangle.fill", L("需要「输入监控」权限", "Needs Input Monitoring"),
@@ -1209,6 +1289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var glow: Light?            // the colour currently breathing on the screen edges
     private var fadeStart: CFTimeInterval?   // the screen glow is fading out
     private var keyboardState: Light?   // what the keyboard was last told
+    private var keyboardLive = KeyboardLive()
     // done on the screen goes dark once you have been back for a while; the keyboard and menu bar keep it
     private var doneSeenThrough = Date.distantPast   // done states written up to here have been seen
     private var doneShown: (stamp: Date, at: Date)?  // the newest done state and when it appeared
@@ -1268,6 +1349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
         setUpDot()
+        keyboardSettings.liveKeysChanged = { [weak self] in self?.keyboard.apply(); self?.refreshPanel() }
         keyboardSettings.currentPayload = { [weak self] in self?.keyboardPayload() ?? [] }
         keyboardSettings.start()
         refreshLoginItem()
@@ -1299,7 +1381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
-        keyboard.show(.idle)   // hand the side lights back to the keyboard's own effect
+        keyboard.show(.idle)   // hand the lights back to the keyboard's own effects
     }
 
     private var legacyHooksInUse: Bool { targets.contains { $0.status == .legacy } }
@@ -1311,13 +1393,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func syncKeyboard(force: Bool = false) {
         let want = strongest { self.defaults.bool(forKey: $0.keyboardKey) } ?? .idle
-        guard force || want != keyboardState else { return }
+        var live = KeyboardLive(light: want, compose: false, kana: true)   // keys and ring dark
+        if defaults.bool(forKey: "keyboardKeysBreathe") {
+            // they show the most urgent state even when its top lights are off
+            let top = sessions.map(\.light).max() ?? .idle
+            live = KeyboardLive(light: top, compose: true, kana: style(top).map { defaults.bool(forKey: $0.keyboardKey) } ?? true)
+        }
+        guard force || want != keyboardState || live != keyboardLive else { return }
         keyboardState = want
+        keyboardLive = live
         if want != .idle, !keyboard.names.isEmpty, keyboard.access == kIOHIDAccessTypeUnknown, !defaults.bool(forKey: "askedKeyboardAccess") {
             defaults.set(true, forKey: "askedKeyboardAccess")
             keyboard.requestAccess()
         }
-        keyboard.show(want)
+        keyboard.show(want, live: live)
         if force { keyboard.apply() }
     }
 
@@ -1504,6 +1593,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
         panel.keyboardName = keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) }
         panel.keyboardSync = keyboardSettings.status
+        panel.keyboardLiveKeys = keyboard.names.first.map(hasLiveKeys) ?? false
         panel.keyboardNeedsAccess = !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted
         panel.agents = targets.enumerated().map { i, t in
             let status = t.status
@@ -1535,6 +1625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyboardSettings.send()
         } else if key == "keyboardKeysBreathe" {
             keyboardSettings.send(force: true)
+            syncKeyboard(force: true)
         } else if styles.contains(where: { $0.keyboardKey == key }) {
             sessions = readSessions(includeLegacy: legacyHooksInUse)
             syncKeyboard(force: true)

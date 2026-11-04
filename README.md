@@ -29,7 +29,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 点击菜单栏图标打开设置面板。面板中央是一块小屏幕和一把键盘的实景预览，按所选状态的颜色、亮度和节奏实时发光；各项说明可将鼠标悬停在 ⓘ 上查看。
 
 - **选择状态**：预览下方的「待确认」「执行中」「已完成」三个标签切换要设置的状态，打开面板时默认选中当前状态。面板的主题色随所选状态变为蓝、橙或绿。
-- **显示位置**：「屏幕边缘」「键盘侧灯」两个方块分别控制该状态是否在屏幕边缘、键盘上发光，点一下切换。未发光的位置在该状态下不亮灯；键盘不发光时显示你原本设置的灯效。第三个方块「按键背光」控制按键背光是否与侧灯一同发光，三种状态共用此设置；该状态的键盘侧灯关闭时不可用。
+- **显示位置**：「屏幕边缘」「键盘呼吸灯」分别控制该状态是否在屏幕边缘和键盘呼吸灯上发光，点一下切换。键盘呼吸灯在 Halo65 V2 上指左上角灯条，在 Air60 V2 上指两侧灯条。第三个方块「按键背光」控制按键和光环（HALO 标志没有独立灯珠，随光环亮灭），三种状态共用：使用 2026-11-04 之后的 Halo65 V2 固件时，关闭后按键和光环全黑；旧固件关闭后只是不再显示状态颜色，按键恢复键盘自身的灯效（NuPhy 默认灯效只点亮 F、J、↑，呈蓝色）。
 - **发光的显示器**：连接两台及以上显示器时，面板中列出每台显示器，点按钮分别选择是否发光，对三种状态统一生效。设置按显示器记录，拔掉再接上、重启电脑后保持不变；新接入的显示器默认发光。
 - **亮度**：每种状态各有一个亮度。拖动滑块时，预览和屏幕边缘立即按新亮度显示；键盘通过 USB 有线连接时同步调整。
 - **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。之后如有其他会话完成，绿光重新显示。绿光显示期间，「已完成」页的这一项旁边有「立即关闭」按钮。
@@ -85,8 +85,8 @@ Codex、Gemini CLI、Qoder、ZCode 是 v1.9.0 新增的，按各工具的官方�
 Agent Lumen 也是 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) 的 Mac 端控制程序。给 NuPhy Air60 V2 或 Halo65 V2 刷入该项目的固件后，键盘侧边灯条（Halo65 为整圈光环）会和屏幕同时亮灯，两者**共用同一套钩子**，颜色和节奏完全一致。
 
 - **工作原理**：Mac 通过 Num Lock、Scroll Lock 两个指示灯信号（macOS 不使用这两个键）告诉键盘当前状态，USB 有线、蓝牙、2.4G 无线连接都能传送。键盘断开重连（休眠唤醒、切换连接方式）后，App 会自动重新发送状态。
-- **按键背光**（面板中的方块）：开启时，按键背光与侧边灯条一同显示状态颜色；关闭时仅侧边灯条显示。三种状态共用此设置，这是键盘固件的限制。
-- **亮度与「按键背光」需在 USB 有线连接时写入键盘**，因为键盘的无线模块只转发指示灯信号。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置；无线连接期间在面板中修改的设置，会在下次插上 USB 线时自动写入。需要 2026-11-03 之后的键盘固件。
+- **按键背光**（面板中的方块）：开启时，按键和光环显示状态颜色；关闭时的效果取决于固件，见上文「显示位置」。三种状态共用此设置。
+- **亮度需在 USB 有线连接时写入键盘**，因为键盘的无线模块只转发指示灯信号。「键盘呼吸灯」「按键背光」用两个闲置的指示灯位传送，Halo65 V2 刷入 2026-11-04 之后的固件并插线连接一次后，蓝牙下也能立即切换；其他固件仍需插线写入按键背光。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置；无线连接期间在面板中修改的设置，会在下次插上 USB 线时自动写入。需要 2026-11-03 之后的键盘固件。
 - **输入监控权限**：第一次连接 NuPhy 键盘时，macOS 会请求「输入监控」权限。这是 macOS 允许 App 设置键盘指示灯的前提。Agent Lumen **只设置指示灯，不读取任何按键**。授权后需重新打开一次 App。
 - **更新 App 后键盘灯不亮**：macOS 把这项权限绑定在 App 的签名上，未付费签名的 App 每个新版本签名都不同，权限会失效。请到「系统设置 → 隐私与安全性 → 输入监控」，选中旧的 Agent Lumen 点「−」删除，再重新打开 App 并点「允许」。诊断日志位于 `~/.agent-lumen/lumen.log`。
 - 自己编译时，`./build.sh install` 会用钥匙串里的 Apple 开发证书（如有）给本机这份 App 签名，这样之后重新编译不会丢失权限。
@@ -129,7 +129,7 @@ The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60
 - Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
 - The settings panel follows the system's light or dark appearance, or can be pinned to either.
 - With two or more displays, choose which of them glow; the choice is remembered per display.
-- Choose per state whether it shows on the screen edges, the keyboard, or both; a third tile adds the key backlights, shared by all three states. Click the menu bar icon to open the settings panel.
+- Choose per state whether it shows on the screen edges and the keyboard's top lights (the top left strip on a Halo65 V2, the side lights on an Air60 V2). A third tile controls the keys and the halo ring, shared by all three states: with Halo65 V2 firmware from 2026-11-04 on, off means dark and switches right away over Bluetooth too (connect over USB once first); older firmware applies it over USB and shows the keyboard's own key effect when off. Click the menu bar icon to open the settings panel.
 - The AI agents row opens a page with a switch for each agent, so you choose which ones to connect.
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the panel lists every agent's sessions.
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
