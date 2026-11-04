@@ -13,7 +13,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 
 ## 它做什么
 
-你让 Claude Code（或 WorkBuddy、Devin）去执行任务，自己切到别的窗口。Agent Lumen 用灯光告诉你它当前的状态，你不用来回切换窗口查看。灯光会出现在三个位置：菜单栏图标、屏幕四周边缘、NuPhy 键盘。
+你让 Claude Code、Codex、Gemini CLI 等 AI 工具去执行任务，自己切到别的窗口。Agent Lumen 用灯光告诉你它当前的状态，你不用来回切换窗口查看。灯光会出现在三个位置：菜单栏图标、屏幕四周边缘、NuPhy 键盘。
 
 | 状态 | 含义 | 灯光 |
 |---|---|---|
@@ -29,12 +29,13 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 点击菜单栏图标打开设置面板。面板中央是一块小屏幕和一把键盘的实景预览，按所选状态的颜色、亮度和节奏实时发光；各项说明可将鼠标悬停在 ⓘ 上查看。
 
 - **选择状态**：预览下方的「待确认」「执行中」「已完成」三个标签切换要设置的状态，打开面板时默认选中当前状态。面板的主题色随所选状态变为蓝、橙或绿。
-- **显示位置**：「屏幕边缘」「键盘侧灯」两个方块分别控制该状态是否在屏幕边缘、键盘上发光，点一下切换。未发光的位置在该状态下不亮灯；键盘不发光时显示你原本设置的灯效。
+- **显示位置**：「屏幕边缘」「键盘侧灯」两个方块分别控制该状态是否在屏幕边缘、键盘上发光，点一下切换。未发光的位置在该状态下不亮灯；键盘不发光时显示你原本设置的灯效。第三个方块「按键背光」控制按键背光是否与侧灯一同发光，三种状态共用此设置；该状态的键盘侧灯关闭时不可用。
 - **发光的显示器**：连接两台及以上显示器时，面板中列出每台显示器，点按钮分别选择是否发光，对三种状态统一生效。设置按显示器记录，拔掉再接上、重启电脑后保持不变；新接入的显示器默认发光。
 - **亮度**：每种状态各有一个亮度。拖动滑块时，预览和屏幕边缘立即按新亮度显示；键盘通过 USB 有线连接时同步调整。
 - **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。之后如有其他会话完成，绿光重新显示。绿光显示期间，「已完成」页的这一项旁边有「立即关闭」按钮。
   - 判断你是否在电脑前，只读取系统记录的「距上次操作的秒数」，不需要额外权限，不读取按键内容。
 - **外观**：设置面板默认跟随系统，macOS 切换浅色或深色（夜间）外观时自动跟着变；也可在面板底部「外观」中固定为浅色或深色。只影响设置面板，不影响屏幕边缘发光、键盘灯和菜单栏图标。
+- **AI 助手**：面板中的这一行显示已接入的工具，点开后可用开关逐个接入或断开。开关后不用重启 App；已打开的会话需重新打开后生效。没装的工具折叠在底部。
 - **多个会话、多个助手同时运行**：显示其中优先级最高的状态，顺序为 待确认 > 执行中 > 已完成。
 - 屏幕边缘的灯光**不拦截鼠标点击**，在多块屏幕、全屏应用中都会显示。
 - 资源占用很低：只在有灯光变化时刷新，实测 CPU 约 1%。不联网，不收集任何数据。
@@ -44,10 +45,16 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 | 工具 | 配置文件 | 说明 |
 |---|---|---|
 | Claude Code（命令行、桌面版 Code 页、IDE 插件） | `~/.claude/settings.json` | |
+| Codex（命令行、桌面版） | `~/.codex/hooks.json` | 接入后需在 Codex 里输入 `/hooks`，或打开桌面版「设置 → Hooks」，信任一次钩子 |
+| Gemini CLI | `~/.gemini/settings.json` | |
+| Qoder | `~/.qoder/settings.json` | |
 | WorkBuddy | `~/.workbuddy/settings.json` | |
 | Devin（本机会话） | `~/.config/devin/config.json` | 首次运行时，Devin 会询问是否「信任此工作区」，需选择信任；云端会话不会触发灯光 |
+| ZCode | `~/.zcode/cli/config.json` | 接入时会打开 ZCode 的钩子总开关；断开时只移除 Agent Lumen 的钩子，总开关保持打开 |
 
-三个工具使用同一种「钩子」（hook）机制：工具在你发送消息、调用完一个工具、请求权限、完成一轮回复时，各运行一条命令。Agent Lumen 添加的就是这几条命令，它们只往 `~/.agent-lumen/sessions/` 写入一个表示状态的单词。
+Codex、Gemini CLI、Qoder、ZCode 是 v1.9.0 新增的，按各工具的官方文档接入，尚未逐一实机验证。如果某个工具的灯不亮，欢迎提 Issue。
+
+这些工具都有「钩子」（hook）机制：在你发送消息、调用完一个工具、请求权限、完成一轮回复时，各运行一条命令。Agent Lumen 添加的就是这几条命令，它们只往 `~/.agent-lumen/sessions/` 写入一个表示状态的单词，不保存对话内容。
 
 ## 安装
 
@@ -67,7 +74,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 
 ## 断开与卸载
 
-- 在设置面板「已接入的 AI 助手」中点「管理接入」，选择「断开」即可移除该助手的钩子；也可以在终端执行：
+- 在设置面板的「AI 助手」里关闭对应开关，即可移除该工具的钩子；也可以在终端执行：
   ```bash
   "/Applications/Agent Lumen.app/Contents/MacOS/AgentLumen" --disconnect
   ```
@@ -78,12 +85,12 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 Agent Lumen 也是 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) 的 Mac 端控制程序。给 NuPhy Air60 V2 或 Halo65 V2 刷入该项目的固件后，键盘侧边灯条（Halo65 为整圈光环）会和屏幕同时亮灯，两者**共用同一套钩子**，颜色和节奏完全一致。
 
 - **工作原理**：Mac 通过 Num Lock、Scroll Lock 两个指示灯信号（macOS 不使用这两个键）告诉键盘当前状态，USB 有线、蓝牙、2.4G 无线连接都能传送。键盘断开重连（休眠唤醒、切换连接方式）后，App 会自动重新发送状态。
-- **按键背光同步显示**（面板中的开关）：开启时，按键背光与侧边灯条一同显示状态颜色；关闭时仅侧边灯条显示。
-- **亮度与「按键背光同步显示」需在 USB 有线连接时写入键盘**，因为键盘的无线模块只转发指示灯信号。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置；无线连接期间在面板中修改的设置，会在下次插上 USB 线时自动写入。需要 2026-11-03 之后的键盘固件。
+- **按键背光**（面板中的方块）：开启时，按键背光与侧边灯条一同显示状态颜色；关闭时仅侧边灯条显示。三种状态共用此设置，这是键盘固件的限制。
+- **亮度与「按键背光」需在 USB 有线连接时写入键盘**，因为键盘的无线模块只转发指示灯信号。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置；无线连接期间在面板中修改的设置，会在下次插上 USB 线时自动写入。需要 2026-11-03 之后的键盘固件。
 - **输入监控权限**：第一次连接 NuPhy 键盘时，macOS 会请求「输入监控」权限。这是 macOS 允许 App 设置键盘指示灯的前提。Agent Lumen **只设置指示灯，不读取任何按键**。授权后需重新打开一次 App。
 - **更新 App 后键盘灯不亮**：macOS 把这项权限绑定在 App 的签名上，未付费签名的 App 每个新版本签名都不同，权限会失效。请到「系统设置 → 隐私与安全性 → 输入监控」，选中旧的 Agent Lumen 点「−」删除，再重新打开 App 并点「允许」。诊断日志位于 `~/.agent-lumen/lumen.log`。
 - 自己编译时，`./build.sh install` 会用钥匙串里的 Apple 开发证书（如有）给本机这份 App 签名，这样之后重新编译不会丢失权限。
-- 以前安装过键盘灯项目自带钩子（`claude-light`）的，面板中该助手会标为「需更新」。在「管理接入」中选择「更新」，即可换成共享钩子并删除旧钩子；键盘灯项目的后台程序也可以停用了。
+- 以前安装过键盘灯项目自带钩子（`claude-light`）的，「AI 助手」页会显示「检测到旧版钩子」。点「更新」，即可换成共享钩子并删除旧钩子；键盘灯项目的后台程序也可以停用了。
 
 ## 自己编译
 
@@ -100,13 +107,15 @@ cd agent-lumen
 
 - 按 Esc 中断 Claude 时，不会触发「完成」钩子，状态会停在「执行中」；超过 2 小时没有新的状态，会自动按「已完成」处理。
 - Claude Code 在回复正文中以文字向你提问（而不是弹出提问框）时，按「已完成」处理。
+- ZCode 没有会话结束事件，关闭窗口后最后的状态最多保留 2 小时。
+- Gemini CLI 的钩子文档没有明确写批准提示何时触发，「待确认」以实际表现为准。
 - 只做了 macOS。
 
 ---
 
 ## English
 
-You hand a task to Claude Code (or WorkBuddy, or Devin) and switch to another window. Agent Lumen shows its state as a colour, in the menu bar and as a soft glow around the edge of every screen:
+You hand a task to Claude Code, Codex, Gemini CLI or another agent and switch to another window. Agent Lumen shows its state as a colour, in the menu bar and as a soft glow around the edge of every screen:
 
 | State | Glow |
 |---|---|
@@ -120,15 +129,16 @@ The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60
 - Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
 - The settings panel follows the system's light or dark appearance, or can be pinned to either.
 - With two or more displays, choose which of them glow; the choice is remembered per display.
-- Choose per state whether it shows on the screen edges, the keyboard, or both. Click the menu bar icon to open the settings panel.
+- Choose per state whether it shows on the screen edges, the keyboard, or both; a third tile adds the key backlights, shared by all three states. Click the menu bar icon to open the settings panel.
+- The AI agents row opens a page with a switch for each agent, so you choose which ones to connect.
 - Several sessions and agents at once: the most urgent wins (blue > orange > green); the panel lists every agent's sessions.
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
 
-**Supported agents:** Claude Code (`~/.claude/settings.json`), WorkBuddy (`~/.workbuddy/settings.json`), Devin local sessions (`~/.config/devin/config.json`; answer Devin's workspace trust prompt). All three use the same hook format. Agent Lumen adds a few hook commands that write a single word to `~/.agent-lumen/sessions/`.
+**Supported agents:** Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`; trust the hooks once with `/hooks` or Settings → Hooks in the desktop app), Gemini CLI (`~/.gemini/settings.json`), Qoder (`~/.qoder/settings.json`), WorkBuddy (`~/.workbuddy/settings.json`), Devin local sessions (`~/.config/devin/config.json`; answer Devin's workspace trust prompt), ZCode (`~/.zcode/cli/config.json`; connecting turns on its hooks setting, and disconnecting leaves it on). Codex, Gemini CLI, Qoder and ZCode are new in v1.9.0: built from their official docs and not yet tested on each one. Agent Lumen adds a few hook commands that write a single word to `~/.agent-lumen/sessions/`.
 
 **Install:** download the zip from [Releases](https://github.com/hongqi7/agent-lumen/releases/latest), unzip and move **Agent Lumen.app** to Applications. The app is not notarized, so the first time **right-click → Open → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Agent Lumen.app"`). On first launch it offers to connect the agents it finds and backs up each settings file first. Restart sessions that were already open. macOS 13+, Apple silicon and Intel.
 
-**Disconnect:** use Add or remove in the panel, or run `"/Applications/Agent Lumen.app/Contents/MacOS/AgentLumen" --disconnect`. Then delete the app, `~/.agent-lumen` and, if you enabled it, `~/Library/LaunchAgents/io.github.hongqi7.agent-lumen.plist`.
+**Disconnect:** switch the agent off under AI agents in the panel, or run `"/Applications/Agent Lumen.app/Contents/MacOS/AgentLumen" --disconnect`. Then delete the app, `~/.agent-lumen` and, if you enabled it, `~/Library/LaunchAgents/io.github.hongqi7.agent-lumen.plist`.
 
 **Build:** `./build.sh` (needs only the Xcode command line tools). One source file, no dependencies.
 

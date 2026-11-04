@@ -1,7 +1,7 @@
 #!/bin/bash
 # Agent Lumen hook: records one agent session's state for the menu bar app.
 #   lumen-hook working|done|attention|end [agent]     (hook JSON with session_id on stdin)
-# Called by Claude Code / WorkBuddy / Devin hooks. Must stay fast and never fail the hook:
+# Called by the hooks of every connected agent. Must stay fast and never fail the hook:
 # in hook protocols exit code 2 means "block", so every path exits 0.
 
 DIR="$HOME/.agent-lumen/sessions"

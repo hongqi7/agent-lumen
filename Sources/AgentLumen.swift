@@ -1,5 +1,5 @@
 // Agent Lumen (灵光): a menu bar light, a screen-edge glow and (optionally) NuPhy keyboard side lights
-// that show what your AI coding agents are doing — Claude Code, WorkBuddy and Devin.
+// that show what your AI coding agents are doing — Claude Code, Codex, Gemini CLI, Qoder, WorkBuddy, Devin and ZCode.
 // Blue: waiting for your approval. Orange: working. Green: done.
 // Each agent session reports its state through hooks (Resources/lumen-hook); this app is the only reader.
 import AppKit
@@ -74,9 +74,10 @@ func readSessions(includeLegacy: Bool) -> [Session] {
             var light = Light(word: text.trimmingCharacters(in: .whitespacesAndNewlines))
             if light == .idle { continue }
             if light > .done && now.timeIntervalSince(mtime) > staleSeconds { light = .done }
-            let agent = name.hasPrefix("workbuddy-") ? "WorkBuddy"
-                      : name.hasPrefix("devin-") ? "Devin" : "Claude Code"
-            out.append(Session(agent: agent, light: light, changed: mtime))
+            let target = targets.first { !$0.arg.isEmpty && name.hasPrefix($0.arg + "-") } ?? targets[0]
+            // an agent that never reports a session's end can't clear its last state: let it go in time
+            if !target.reportsEnd && now.timeIntervalSince(mtime) > staleSeconds { continue }
+            out.append(Session(agent: target.name, light: light, changed: mtime))
         }
     }
     return out
@@ -113,6 +114,15 @@ func wave(_ t: CFTimeInterval, _ period: Double) -> CGFloat {
 
 // MARK: - hooks
 
+// where command line agents usually live: an app started from Finder doesn't get the shell's PATH
+let commandDirs: [String] = {
+    var dirs = [home + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", home + "/.npm-global/bin",
+                home + "/.bun/bin", home + "/.volta/bin", home + "/Library/pnpm"]
+    let nvm = home + "/.nvm/versions/node"
+    for version in (try? FileManager.default.contentsOfDirectory(atPath: nvm)) ?? [] { dirs.append("\(nvm)/\(version)/bin") }
+    return dirs
+}()
+
 // One agent we can wire up: where its settings live and which hook events map to which state.
 // Event names differ: Devin drops its whole hooks object if it sees one it doesn't know.
 struct AgentTarget {
@@ -121,30 +131,75 @@ struct AgentTarget {
     let settings: String
     let arg: String                          // session file prefix
     let events: [(event: String, state: String, matcher: String?)]
+    var timeout = 5                          // in the unit this agent reads: seconds, milliseconds for Gemini CLI
+    var nestedEvents = false                 // ZCode: { "hooks": { "enabled": true, "events": { ... } } }
+    // a folder alone doesn't prove these are installed: other tools create ~/.codex and ~/.gemini too
+    var commands: [String] = []
+    var apps: [String] = []
+    var folderMeansInstalled = true
+    var needsTrust = false                   // the agent skips new hooks until the user approves them there
+    var note: String? = nil
 
-    enum Status { case absent, off, lumen, legacy }
+    enum Status { case absent, off, lumen, legacy, broken }
+
+    var reportsEnd: Bool { events.contains { $0.state == "end" } }
+
+    var installed: Bool {
+        let fm = FileManager.default
+        if folderMeansInstalled && fm.fileExists(atPath: configDir) { return true }
+        return commands.contains { c in commandDirs.contains { fm.isExecutableFile(atPath: "\($0)/\(c)") } }
+            || apps.contains { fm.fileExists(atPath: "/Applications/\($0).app") || fm.fileExists(atPath: home + "/Applications/\($0).app") }
+    }
 
     var status: Status {
-        guard FileManager.default.fileExists(atPath: configDir) else { return .absent }
-        let text = (try? String(contentsOfFile: settings, encoding: .utf8)) ?? ""
+        let data = FileManager.default.contents(atPath: settings) ?? Data()
+        let text = String(decoding: data, as: UTF8.self)
+        guard text.contains("lumen-hook") || installed else { return .absent }   // still connected: keep it offered
+        if !data.isEmpty, (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] == nil { return .broken }
         if text.contains("lumen-hook") { return .lumen }
         if text.contains("claude-light") { return .legacy }   // the older standalone keyboard-light hooks
         return .off
     }
 }
 
+// the order the panel lists them in
 let targets = [
     AgentTarget(name: "Claude Code", configDir: home + "/.claude", settings: home + "/.claude/settings.json", arg: "",
                 events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", "*"),
                          ("PreToolUse", "attention", "AskUserQuestion"), ("Notification", "attention", "permission_prompt"),
                          ("Stop", "done", nil), ("SessionEnd", "end", nil)]),
+    // SessionEnd and Interrupt allow 3 seconds at most. Stopping a turn is neither work nor a finished task: back to idle
+    AgentTarget(name: "Codex", configDir: home + "/.codex", settings: home + "/.codex/hooks.json", arg: "codex",
+                events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
+                         ("PermissionRequest", "attention", nil), ("Stop", "done", nil),
+                         ("Interrupt", "end", nil), ("SessionEnd", "end", nil)],
+                timeout: 3, commands: ["codex"], apps: ["Codex"], folderMeansInstalled: false, needsTrust: true,
+                note: L("Codex 会跳过未经审核的钩子。在 Codex 里输入 /hooks，或打开桌面版的“设置 → Hooks”，信任后开始生效。",
+                        "Codex skips hooks it hasn't reviewed. Type /hooks in Codex, or open Settings → Hooks in the desktop app, and trust them.")),
+    AgentTarget(name: "Gemini CLI", configDir: home + "/.gemini", settings: home + "/.gemini/settings.json", arg: "gemini",
+                events: [("BeforeAgent", "working", nil), ("AfterTool", "working", nil),
+                         ("Notification", "attention", nil), ("AfterAgent", "done", nil), ("SessionEnd", "end", nil)],
+                timeout: 5000, commands: ["gemini"], folderMeansInstalled: false),
+    AgentTarget(name: "Qoder", configDir: home + "/.qoder", settings: home + "/.qoder/settings.json", arg: "qoder",
+                events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
+                         ("PermissionRequest", "attention", nil), ("Notification", "attention", "permission_prompt"),
+                         ("Stop", "done", nil), ("StopFailure", "done", nil), ("SessionEnd", "end", nil)]),
     AgentTarget(name: "WorkBuddy", configDir: home + "/.workbuddy", settings: home + "/.workbuddy/settings.json", arg: "workbuddy",
                 events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
                          ("PermissionRequest", "attention", nil), ("Notification", "attention", "permission_prompt"),
                          ("Stop", "done", nil), ("StopFailure", "done", nil), ("SessionEnd", "end", nil)]),
     AgentTarget(name: "Devin", configDir: home + "/.config/devin", settings: home + "/.config/devin/config.json", arg: "devin",
                 events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
-                         ("PermissionRequest", "attention", nil), ("Stop", "done", nil), ("SessionEnd", "end", nil)]),
+                         ("PermissionRequest", "attention", nil), ("Stop", "done", nil), ("SessionEnd", "end", nil)],
+                note: L("Devin 桌面版要退出重开，并在“信任此工作区”时选择信任。云端会话不显示状态。",
+                        "Quit and reopen Devin Desktop, and trust the workspace when asked. Cloud sessions don't report.")),
+    // ZCode has no session end event, and leaves hooks off until asked
+    AgentTarget(name: "ZCode", configDir: home + "/.zcode", settings: home + "/.zcode/cli/config.json", arg: "zcode",
+                events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil), ("PostToolUseFailure", "working", nil),
+                         ("PermissionRequest", "attention", nil), ("Stop", "done", nil)],
+                nestedEvents: true, commands: ["zcode"], apps: ["ZCode"],
+                note: L("接入时会打开 ZCode 的钩子总开关，断开时只移除 Agent Lumen 的钩子，总开关保持打开。",
+                        "Connecting turns on ZCode's hooks setting. Disconnecting removes only Agent Lumen's hooks and leaves that setting on.")),
 ]
 
 enum HookError: Error { case unreadable(String) }
@@ -165,27 +220,36 @@ func setHooks(_ t: AgentTarget, install: Bool) throws {
         let stamp = Int(Date().timeIntervalSince1970)
         try? fm.copyItem(atPath: t.settings, toPath: t.settings + ".bak-agent-lumen-\(stamp)")
     }
-    var hooks = root["hooks"] as? [String: Any] ?? [:]
+    var container = root["hooks"] as? [String: Any] ?? [:]
+    var hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
     func isLumen(_ entry: Any) -> Bool {
         ((entry as? [String: Any])?["hooks"] as? [[String: Any]] ?? [])
             .contains { c in ["lumen-hook", "claude-light"].contains { (c["command"] as? String ?? "").contains($0) } }
     }
+    // only event lists: "hooks" can also hold an agent's own settings, such as "enabled"
     for event in Array(hooks.keys) {
-        let kept = (hooks[event] as? [Any] ?? []).filter { !isLumen($0) }
+        guard let list = hooks[event] as? [Any] else { continue }
+        let kept = list.filter { !isLumen($0) }
         hooks[event] = kept.isEmpty ? nil : kept
     }
     if install {
         for e in t.events {
             var entry: [String: Any] = ["hooks": [["type": "command",
                                                    "command": "\"\(hookPath)\" \(e.state) \(t.arg)".trimmingCharacters(in: .whitespaces),
-                                                   "timeout": 5]]]
+                                                   "timeout": t.timeout]]]
             if let m = e.matcher { entry["matcher"] = m }
             hooks[e.event] = [entry] + (hooks[e.event] as? [Any] ?? [])
         }
     }
-    root["hooks"] = hooks
+    if t.nestedEvents {
+        container["events"] = hooks
+        if install { container["enabled"] = true }
+    } else {
+        container = hooks
+    }
+    root["hooks"] = container
     let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .withoutEscapingSlashes])
-    try fm.createDirectory(atPath: t.configDir, withIntermediateDirectories: true)
+    try fm.createDirectory(atPath: (t.settings as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     try data.write(to: URL(fileURLWithPath: t.settings), options: .atomic)
     if let perms { try? fm.setAttributes([.posixPermissions: perms], ofItemAtPath: t.settings) }
 }
@@ -518,9 +582,12 @@ struct AgentRow: Identifiable {
     let id: Int
     let name: String
     let status: AgentTarget.Status
+    let waitingForTrust: Bool
+    let failed: Bool
+    let note: String?
 }
 
-enum PanelAction { case dismissDone, toggleAgent(Int), toggleDisplay(String), askKeyboardAccess, toggleLogin, quit }
+enum PanelAction { case dismissDone, toggleAgent(Int), showAgents(Bool), toggleAbsentAgents, toggleDisplay(String), askKeyboardAccess, toggleLogin, quit }
 
 // what the panel shows; the app delegate fills it in and carries out the actions
 final class PanelModel: ObservableObject {
@@ -529,6 +596,8 @@ final class PanelModel: ObservableObject {
     @Published var keyboardSync = KeyboardSettings.Sync.noCable
     @Published var keyboardNeedsAccess = false
     @Published var agents: [AgentRow] = []
+    @Published var onAgentsPage = false
+    @Published var absentAgentsOpen = false
     @Published var openAtLogin = false
     @Published var displays: [DisplayRow] = []
     @Published var selected = Light.working   // the state whose settings the panel shows
@@ -577,6 +646,9 @@ enum Ink {
     static let windowLine = dyn(0xD8D8DE, 1, 0x2E2C31, 1)
     static let keyboard = dyn(0xE4E4E9, 1, 0x2A282D, 1)
     static let key = dyn(0xC9C9CF, 1, 0x45434A, 1)
+    // agent status lines
+    static let warn = dyn(0xB26A00, 1, 0xF0B45A, 1)
+    static let bad = dyn(0xC93A32, 1, 0xFF7B72, 1)
 }
 
 struct PanelView: View {
@@ -743,21 +815,28 @@ struct PanelContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            LightPreview(style: st, level: UserDefaults.standard.double(forKey: st.levelKey),
-                         onScreen: isOn(st.onKey), onKeyboard: isOn(st.keyboardKey), wholeKeyboard: isOn("keyboardKeysBreathe"))
-            tabs.padding(.top, 12)
-            Text(st.help.replacingOccurrences(of: "\n", with: chinese ? "" : " "))
-                .font(.system(size: 12)).foregroundColor(Ink.muted)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 10).padding(.horizontal, 2)
-            HStack(spacing: 8) {
-                tile(L("屏幕边缘", "Screen edges"), "display", st.onKey)
-                tile(L("键盘侧灯", "Keyboard"), "keyboard", st.keyboardKey)
+            if model.onAgentsPage {
+                agentsPage
+            } else {
+                LightPreview(style: st, level: UserDefaults.standard.double(forKey: st.levelKey),
+                             onScreen: isOn(st.onKey), onKeyboard: isOn(st.keyboardKey), wholeKeyboard: isOn("keyboardKeysBreathe"))
+                tabs.padding(.top, 12)
+                Text(st.help.replacingOccurrences(of: "\n", with: chinese ? "" : " "))
+                    .font(.system(size: 12)).foregroundColor(Ink.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10).padding(.horizontal, 2)
+                HStack(spacing: 8) {
+                    tile(L("屏幕边缘", "Screen"), "display", st.onKey)
+                    tile(L("键盘侧灯", "Side lights"), "keyboard", st.keyboardKey)
+                    // one setting in the keyboard's firmware, and it lights only along with the side lights
+                    tile(L("按键背光", "Key lights"), "square.grid.3x2", "keyboardKeysBreathe",
+                         needs: isOn(st.keyboardKey) ? nil : L("需开侧灯", "Side lights off"))
+                }
+                .padding(.top, 10)
+                brightness.padding(.top, 12)
+                if st.light == .done { doneDelay.padding(.top, 10) }
+                list.padding(.top, 14)
             }
-            .padding(.top, 10)
-            brightness.padding(.top, 12)
-            if st.light == .done { doneDelay.padding(.top, 10) }
-            list.padding(.top, 14)
         }
         .padding(16)
         .foregroundColor(Ink.text)
@@ -787,24 +866,27 @@ struct PanelContent: View {
         }
     }
 
-    private func tile(_ title: String, _ symbol: String, _ key: String) -> some View {
-        let on = isOn(key)
+    // `needs`: why this switch can't take effect right now
+    private func tile(_ title: String, _ symbol: String, _ key: String, needs: String? = nil) -> some View {
+        let on = needs == nil && isOn(key)
         return Button { model.bool(key).wrappedValue.toggle() } label: {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(spacing: 4) {
                 Image(systemName: symbol).font(.system(size: 16)).foregroundColor(on ? accent : Ink.muted)
-                Text(title).font(.system(size: 13, weight: .medium)).padding(.top, 2)
-                Text(on ? L("发光", "On") : L("不发光", "Off")).font(.system(size: 11))
+                    .frame(height: 20)   // symbols differ in height; keep the titles on one line
+                Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1).padding(.top, 2)
+                Text(needs ?? (on ? L("发光", "On") : L("不发光", "Off"))).font(.system(size: 11)).lineLimit(1)
                     .foregroundColor(on ? Ink.text.opacity(0.75) : Ink.faint)
             }
             .foregroundColor(on ? Ink.text : Ink.muted)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 12).fill(on ? Ink.cardOn : Ink.card))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(on ? accent.opacity(0.6) : Ink.line, lineWidth: on ? 1 : 0.5))
             .shadow(color: on ? Ink.shadow : .clear, radius: 1, y: 0.5)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(needs != nil)
     }
 
     private var brightness: some View {
@@ -859,7 +941,7 @@ struct PanelContent: View {
                     Text(title)
                     if let info { InfoButton(text: info) }
                 }
-                if let detail { Text(detail).font(.system(size: 11)).foregroundColor(Ink.faint) }
+                if let detail { Text(detail).font(.system(size: 11)).foregroundColor(Ink.faint).lineLimit(1) }
             }
             Spacer(minLength: 6)
             trailing()
@@ -876,19 +958,9 @@ struct PanelContent: View {
         }
     }
 
-    private func menuText(_ a: AgentRow) -> String {
-        switch a.status {
-        case .lumen:  return L("断开 ", "Disconnect ") + a.name
-        case .legacy: return L("更新 ", "Update ") + a.name + L(" 的钩子", " hooks")
-        default:      return L("接入 ", "Connect ") + a.name
-        }
-    }
+    private var connectedAgents: [AgentRow] { model.agents.filter { $0.status == .lumen } }
 
-    private var agentsValue: String {
-        let ok = model.agents.filter { $0.status == .lumen }.count
-        if model.agents.isEmpty { return L("未检测到", "none found") }
-        return ok == model.agents.count ? L("\(ok) 个", "\(ok)") : L("\(ok) / \(model.agents.count) 个", "\(ok) of \(model.agents.count)")
-    }
+    private var agentsCount: String { L("\(connectedAgents.count) 个", "\(connectedAgents.count)") }
 
     private func valueMenu<Content: View>(_ value: String, @ViewBuilder _ items: () -> Content) -> some View {
         Menu {
@@ -928,11 +1000,9 @@ struct PanelContent: View {
                 Divider().overlay(Ink.line)
             }
             if let name = model.keyboardName {
-                row("keyboard", L("按键背光同步", "Key backlights"), "\(name) · \(keyboardStatus)",
-                    info: L("开启：按键背光与侧边灯条一同显示状态颜色。\n关闭：仅侧边灯条显示。\n亮度与本项需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。",
-                            "On: key backlights show the state colour with the side light bar.\nOff: only the side light bar.\nSaved to the keyboard over USB; stays in effect over Bluetooth or 2.4G.")) {
-                    Toggle("", isOn: model.bool("keyboardKeysBreathe")).labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                }
+                row("keyboard", name, keyboardStatus,
+                    info: L("亮度与按键背光需在 USB 有线连接时写入键盘，写入后改用蓝牙或 2.4G 连接仍然有效。",
+                            "Brightness and key lights are saved to the keyboard over USB, and stay in effect over Bluetooth or 2.4G.")) { EmptyView() }
                 if model.keyboardNeedsAccess {
                     row("exclamationmark.triangle.fill", L("需要「输入监控」权限", "Needs Input Monitoring"),
                         info: L("macOS 要求此权限才能设置键盘指示灯。Agent Lumen 仅设置指示灯，不读取按键内容。",
@@ -946,18 +1016,17 @@ struct PanelContent: View {
                             "NuPhy Air60 V2 and Halo65 V2 with this project's firmware show up here once connected.")) { EmptyView() }
             }
             Divider().overlay(Ink.line)
-            row("link", L("已接入的 AI 助手", "AI agents"),
-                model.agents.isEmpty ? nil : model.agents.map { a in
-                    a.name + (a.status == .lumen ? "" : a.status == .legacy ? L("（需更新）", " (update)") : L("（未接入）", " (off)"))
-                }.joined(separator: L("、", ", "))) {
-                if model.agents.isEmpty {
-                    Text(agentsValue).font(.system(size: 12)).foregroundColor(Ink.muted)
-                } else {
-                    valueMenu(agentsValue) {
-                        ForEach(model.agents) { a in Button(menuText(a)) { model.perform(.toggleAgent(a.id)) } }
+            Button { model.perform(.showAgents(true)) } label: {
+                row("link", L("AI 助手", "AI agents"),
+                    connectedAgents.isEmpty ? L("未接入", "None connected") : connectedAgents.map(\.name).joined(separator: L("、", ", "))) {
+                    HStack(spacing: 4) {
+                        Text(agentsCount).font(.system(size: 12)).foregroundColor(Ink.muted)
+                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundColor(Ink.faint)
                     }
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             Divider().overlay(Ink.line)
             row("circle.lefthalf.filled", L("外观", "Appearance"),
                 info: L("设置面板的配色。跟随系统时，随 macOS 的浅色或深色外观自动切换。\n不影响屏幕边缘发光、键盘灯和菜单栏图标。",
@@ -995,6 +1064,121 @@ struct PanelContent: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Ink.list))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.line, lineWidth: 0.5))
         .shadow(color: Ink.shadow, radius: 1, y: 0.5)
+    }
+
+    // MARK: agents page
+
+    private var agentsPage: some View {
+        let present = model.agents.filter { $0.status != .absent }
+        let absent = model.agents.filter { $0.status == .absent }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Button { model.perform(.showAgents(false)) } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .medium)).foregroundColor(accent)
+                        .frame(width: 22, height: 24).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L("返回", "Back"))
+                Text(L("AI 助手", "AI agents")).font(.system(size: 14, weight: .semibold))
+                InfoButton(text: L("打开开关后，Agent Lumen 会在该工具的设置文件里加入钩子，用来获取执行状态。修改前自动备份原文件，关闭开关即移除。只记录状态，不保存对话内容。\n已打开的会话需重新打开后生效。",
+                                   "Switching on adds hooks to that agent's settings file so Agent Lumen can tell its state. The file is backed up first, and switching off removes them. Only the state is recorded, never your conversation.\nSessions already open need reopening."))
+                Spacer()
+                Text(L("已接入 \(connectedAgents.count) 个", "\(connectedAgents.count) connected")).font(.system(size: 12)).foregroundColor(Ink.muted)
+            }
+            if !present.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(present.enumerated()), id: \.element.id) { i, a in
+                        if i > 0 { Divider().overlay(Ink.line) }
+                        agentRow(a)
+                    }
+                }
+                .modifier(ListCard())
+            }
+            if !absent.isEmpty {
+                VStack(spacing: 0) {
+                    Button { model.perform(.toggleAbsentAgents) } label: {
+                        HStack {
+                            Text(L("未安装 \(absent.count) 个", "\(absent.count) not installed")).font(.system(size: 12)).foregroundColor(Ink.muted)
+                            Spacer()
+                            Image(systemName: model.absentAgentsOpen ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 10, weight: .semibold)).foregroundColor(Ink.faint)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if model.absentAgentsOpen {
+                        ForEach(absent) { a in
+                            Divider().overlay(Ink.line)
+                            HStack(spacing: 10) {
+                                agentBadge(a.name, on: false)
+                                Text(a.name).foregroundColor(Ink.muted)
+                                Spacer(minLength: 6)
+                                Text(L("安装后可接入", "Connect once installed")).font(.system(size: 11)).foregroundColor(Ink.faint)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                        }
+                    }
+                }
+                .modifier(ListCard())
+            }
+        }
+    }
+
+    private func agentBadge(_ name: String, on: Bool) -> some View {
+        Text(String(name.prefix(1)))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(on ? accent : Ink.muted)
+            .frame(width: 26, height: 26)
+            .background(RoundedRectangle(cornerRadius: 7).fill(on ? accent.opacity(0.14) : Ink.card))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(on ? accent.opacity(0.35) : Ink.line, lineWidth: 0.5))
+    }
+
+    private func agentStatus(_ a: AgentRow) -> (text: String, color: Color) {
+        if a.failed { return (L("写入失败，未作修改", "Couldn't save; nothing changed"), Ink.bad) }
+        switch a.status {
+        case .broken: return (L("设置文件格式有误，未作修改", "Settings file is invalid; not changed"), Ink.bad)
+        case .legacy: return (L("检测到旧版钩子", "Older hooks found"), Ink.warn)
+        case .lumen:
+            return a.waitingForTrust ? (L("还需在 \(a.name) 中信任一次", "Trust the hooks once in \(a.name)"), Ink.warn)
+                                     : (L("已接入", "Connected"), Ink.muted)
+        default: return (L("未接入", "Not connected"), Ink.faint)
+        }
+    }
+
+    private func agentRow(_ a: AgentRow) -> some View {
+        let status = agentStatus(a)
+        return HStack(spacing: 10) {
+            agentBadge(a.name, on: a.status == .lumen)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(a.name)
+                    if let note = a.note { InfoButton(text: note) }
+                }
+                Text(status.text).font(.system(size: 11)).foregroundColor(status.color)
+            }
+            Spacer(minLength: 6)
+            if a.status == .legacy {
+                Button(L("更新", "Update")) { model.perform(.toggleAgent(a.id)) }
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundColor(accent)
+            } else {
+                Toggle("", isOn: Binding(get: { a.status == .lumen }, set: { _ in model.perform(.toggleAgent(a.id)) }))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                    .disabled(a.status == .broken)
+                    .accessibilityLabel(a.name)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+}
+
+// the white rounded card that groups settings rows
+struct ListCard: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(RoundedRectangle(cornerRadius: 12).fill(Ink.list))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.line, lineWidth: 0.5))
+            .shadow(color: Ink.shadow, radius: 1, y: 0.5)
     }
 }
 
@@ -1036,6 +1220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let keyboardSettings = KeyboardSettings()
     private let popover = NSPopover()
     private let panel = PanelModel()
+    private var failedAgents = Set<Int>()   // indexes into targets whose last switch couldn't be saved
 
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
@@ -1097,7 +1282,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.offerHooksOnFirstRun() }
         // for screenshots of the panel: AGENT_LUMEN_OPEN_PANEL=1 opens it right away
         if ProcessInfo.processInfo.environment["AGENT_LUMEN_OPEN_PANEL"] != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.togglePanel() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.togglePanel()
+                if ProcessInfo.processInfo.environment["AGENT_LUMEN_OPEN_PANEL"] == "agents" { self?.perform(.showAgents(true)) }
+            }
         }
     }
 
@@ -1179,6 +1367,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         sessions = readSessions(includeLegacy: legacyHooksInUse)
+        // the first report from an agent proves the user has approved its hooks there
+        for t in targets where t.needsTrust && sessions.contains(where: { $0.agent == t.name }) {
+            defaults.set(true, forKey: "hooksReported.\(t.arg)")
+        }
         state = sessions.map(\.light).max() ?? .idle
         if state != shownState {
             shownState = state
@@ -1291,14 +1483,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tick()
         refreshPanel()
         panel.selected = state == .idle ? .working : state   // open on what is lit now
-        // as tall as the content, but never taller than the screen; beyond that the panel scrolls
-        let natural = NSHostingView(rootView: PanelContent(model: panel, styles: styles, delays: doneDelays)).fittingSize.height
-        let room = (button.window?.screen ?? NSScreen.main).map { $0.visibleFrame.height - 24 } ?? natural
-        panel.height = min(natural, room)
-        popover.contentSize = NSSize(width: panelWidth, height: panel.height)
+        panel.onAgentsPage = false
+        panel.absentAgentsOpen = false
+        fitPanel()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    // as tall as the content, but never taller than the screen; beyond that the panel scrolls
+    private func fitPanel() {
+        let natural = NSHostingView(rootView: PanelContent(model: panel, styles: styles, delays: doneDelays)).fittingSize.height
+        let room = (item.button?.window?.screen ?? NSScreen.main).map { $0.visibleFrame.height - 24 } ?? natural
+        panel.height = min(natural, room)
+        popover.contentSize = NSSize(width: panelWidth, height: panel.height)
     }
 
     private func refreshPanel() {
@@ -1307,9 +1505,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.keyboardName = keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) }
         panel.keyboardSync = keyboardSettings.status
         panel.keyboardNeedsAccess = !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted
-        panel.agents = targets.enumerated().compactMap { i, t in
+        panel.agents = targets.enumerated().map { i, t in
             let status = t.status
-            return status == .absent ? nil : AgentRow(id: i, name: t.name, status: status)
+            let waiting = t.needsTrust && status == .lumen && !defaults.bool(forKey: "hooksReported.\(t.arg)")
+            return AgentRow(id: i, name: t.name, status: status, waitingForTrust: waiting, failed: failedAgents.contains(i),
+                            note: t.needsTrust && !waiting ? nil : t.note)   // a trust reminder only while it applies
         }
         panel.openAtLogin = FileManager.default.fileExists(atPath: loginAgentPath)
         let off = glowOffDisplays
@@ -1349,9 +1549,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let newest = sessions.filter({ $0.light == .done }).map(\.changed).max() { doneSeenThrough = newest }
             tick()
         case .toggleAgent(let i):
-            popover.performClose(nil)
             let t = targets[i]
-            connect([t], install: t.status != .lumen)
+            let install = t.status != .lumen
+            do {
+                try installHookScript()
+                try setHooks(t, install: install)
+                failedAgents.remove(i)
+                if install { defaults.removeObject(forKey: "hooksReported.\(t.arg)") }
+            } catch {
+                failedAgents.insert(i)
+                lumenLog("\(t.name): \(error)")
+            }
+            refreshPanel()
+        case .showAgents(let open):
+            panel.onAgentsPage = open
+            refreshPanel()
+            fitPanel()
+        case .toggleAbsentAgents:
+            panel.absentAgentsOpen.toggle()
+            fitPanel()
         case .askKeyboardAccess:
             // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
             keyboard.requestAccess()
@@ -1404,8 +1620,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.informativeText = L("Agent Lumen 要在下面这些工具的设置里加几条钩子，才能知道它们在干活、在等你还是已经完成：",
                               "Agent Lumen adds a few hooks to these agents' settings so it can tell when they are working, need you, or are done:")
             + "\n\n" + candidates.map { "• \($0.name)  (\($0.settings.replacingOccurrences(of: home, with: "~")))" }.joined(separator: "\n")
-            + L("\n\n修改前会自动备份原文件；以后可以在菜单里随时断开。",
-                "\n\nEach file is backed up first; you can disconnect any time from the menu.")
+            + L("\n\n修改前会自动备份原文件；以后可以在设置面板的“AI 助手”里随时断开。",
+                "\n\nEach file is backed up first; you can disconnect any time under AI agents in the settings panel.")
         a.addButton(withTitle: L("接入", "Connect"))
         a.addButton(withTitle: L("以后再说", "Not now"))
         if a.runModal() == .alertFirstButtonReturn {
