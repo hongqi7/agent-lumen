@@ -799,25 +799,18 @@ struct LightPreview: View {
         }
     }
 
-    // the strip at the top left; the keys and the ring around them
+    // the keys and the ring around them
     private func liveKeyboardView(color: Color, a: Double) -> some View {
-        let top = onKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim
-        return VStack(spacing: 3) {
-            HStack {
-                Capsule().fill(top).frame(width: 14, height: 2.5)
-                Spacer()
-            }
-            .shadow(color: onKeyboard ? color.opacity(a) : .clear, radius: 3)
-            keyRows(wholeKeyboard, color, a)
-                .padding(3)
-                .overlay(RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(wholeKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim, lineWidth: 1))
-                .shadow(color: wholeKeyboard ? color.opacity(a) : .clear, radius: 4)
-        }
-        .padding(5)
-        .background(RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard))
-        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.rim, lineWidth: 1))
-        .padding(.top, 8)
+        keyRows(wholeKeyboard, color, a)
+            .padding(3)
+            .overlay(RoundedRectangle(cornerRadius: 3)
+                .strokeBorder(wholeKeyboard ? color.opacity(0.3 + 0.7 * a) : Ink.rim, lineWidth: 1))
+            .shadow(color: wholeKeyboard ? color.opacity(a) : .clear, radius: 4)
+            .padding(5)
+            .frame(width: 150)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Ink.keyboard))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.rim, lineWidth: 1))
+            .padding(.top, 10)
     }
 
     private func sideLightsKeyboardView(color: Color, a: Double) -> some View {
@@ -1039,13 +1032,28 @@ struct PanelContent: View {
 
     private var agentsCount: String { L("\(connectedAgents.count) 个", "\(connectedAgents.count)") }
 
-    private func valueMenu<Content: View>(_ value: String, @ViewBuilder _ items: () -> Content) -> some View {
-        Menu {
-            items()
-        } label: {
-            Text(value).font(.system(size: 12)).foregroundColor(Ink.muted)
+    private var appearancePicker: some View {
+        let current = UserDefaults.standard.string(forKey: "appearance") ?? "system"
+        return HStack(spacing: 2) {
+            ForEach([("system", L("跟随系统", "System")), ("light", L("浅色", "Light")), ("dark", L("深色", "Dark"))], id: \.0) { key, title in
+                let selected = current == key
+                Button {
+                    model.objectWillChange.send()
+                    UserDefaults.standard.set(key, forKey: "appearance")
+                    model.changed("appearance")
+                } label: {
+                    Text(title).font(.system(size: 12))
+                        .foregroundColor(selected ? Ink.text : Ink.muted)
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Ink.cardOn : .clear)
+                            .shadow(color: selected ? Ink.shadow : .clear, radius: 1, y: 0.5))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .menuStyle(.borderlessButton).fixedSize()
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Ink.card))
     }
 
     private func displayChip(_ d: DisplayRow) -> some View {
@@ -1108,21 +1116,7 @@ struct PanelContent: View {
             }
             .buttonStyle(.plain)
             Divider().overlay(Ink.line)
-            row("circle.lefthalf.filled", L("外观", "Appearance"),
-                info: L("设置面板的配色。跟随系统时，随 macOS 的浅色或深色外观自动切换。\n不影响屏幕边缘发光、键盘灯和菜单栏图标。",
-                        "The settings panel's colours. Follow System switches with macOS light or dark appearance.\nThe glow, keyboard and menu bar icon are not affected.")) {
-                let current = UserDefaults.standard.string(forKey: "appearance") ?? "system"
-                let options = [("system", L("跟随系统", "Follow System")), ("light", L("浅色", "Light")), ("dark", L("深色", "Dark"))]
-                valueMenu(options.first { $0.0 == current }?.1 ?? options[0].1) {
-                    ForEach(options, id: \.0) { key, title in
-                        Toggle(title, isOn: Binding(get: { current == key }, set: { _ in
-                            model.objectWillChange.send()
-                            UserDefaults.standard.set(key, forKey: "appearance")
-                            model.changed("appearance")
-                        }))
-                    }
-                }
-            }
+            row("circle.lefthalf.filled", L("外观", "Appearance")) { appearancePicker }
             Divider().overlay(Ink.line)
             row("power", L("开机自动启动", "Open at login")) {
                 Toggle("", isOn: Binding(get: { model.openAtLogin }, set: { _ in model.perform(.toggleLogin) }))
@@ -1580,6 +1574,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
 
+    // pages switch without animation: an animated popover resize stalls the main thread for over 100 ms
+    private func resizePanelAtOnce() {
+        popover.animates = false
+        fitPanel()
+        popover.animates = true
+    }
+
     // as tall as the content, but never taller than the screen; beyond that the panel scrolls
     private func fitPanel() {
         let natural = NSHostingView(rootView: PanelContent(model: panel, styles: styles, delays: doneDelays)).fittingSize.height
@@ -1655,10 +1656,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .showAgents(let open):
             panel.onAgentsPage = open
             refreshPanel()
-            fitPanel()
+            resizePanelAtOnce()
         case .toggleAbsentAgents:
             panel.absentAgentsOpen.toggle()
-            fitPanel()
+            resizePanelAtOnce()
         case .askKeyboardAccess:
             // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
             keyboard.requestAccess()
