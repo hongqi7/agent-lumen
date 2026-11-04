@@ -501,6 +501,158 @@ final class GlowWindow: NSWindow {
     }
 }
 
+// When a place's green light goes dark: once you have been back at the computer for the chosen time
+// since the newest done state appeared. A session finishing later brings it back.
+struct DoneWatch {
+    var seenThrough = Date.distantPast               // done states written up to here have been seen
+    private var shown: (stamp: Date, at: Date)?      // the newest done state and when it appeared
+    private var backSince: Date?                     // first input after it appeared
+
+    // delay in seconds; below zero means it never turns off on its own
+    mutating func stillOn(newest: Date?, delay: Double, idleFor: TimeInterval, now: Date = Date()) -> Bool {
+        guard let newest, newest > seenThrough else {
+            shown = nil
+            backSince = nil
+            return false
+        }
+        if shown?.stamp != newest {
+            shown = (newest, now)
+            backSince = nil
+        }
+        if delay < 0 { return true }
+        if backSince == nil, let shown, now.addingTimeInterval(-idleFor) > shown.at { backSince = now }
+        if let backSince, now.timeIntervalSince(backSince) >= delay {
+            seenThrough = newest
+            return false
+        }
+        return true
+    }
+}
+
+// MARK: - menu bar icon
+
+// The app icon at menu bar size. Numbers are in the 1024-point space of scripts/make-icon.swift, enlarged so the
+// tile fills the icon. Idle shows the icon's own three-colour screen edge; a state turns the edge its colour.
+enum MenuBarIcon {
+    static let size: CGFloat = 18
+    private static let inset: CGFloat = 0.5
+    private static let scale = (size - inset * 2) / 824
+    private static func p(_ v: CGFloat) -> CGFloat { (v - 100) * scale + inset }
+    private static func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: p(x), y: p(y), width: w * scale, height: h * scale)
+    }
+    private static let screen = rect(232, 300, 560, 410)
+    private static let screenPath = CGPath(roundedRect: screen, cornerWidth: 1.2, cornerHeight: 1.2, transform: nil)
+    private static let edgeWidth: CGFloat = 1.4
+
+    private static func render(_ draw: (CGContext) -> Void) -> CGImage {
+        let c = CGContext(data: nil, width: Int(size * 2), height: Int(size * 2), bitsPerComponent: 8, bytesPerRow: 0,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        c.scaleBy(x: 2, y: 2)
+        draw(c)
+        return c.makeImage()!
+    }
+
+    // the tile, the dark screen and its stand
+    static let base = render { c in
+        let tile = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
+        let radius = 185 * scale
+        c.addPath(CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil))
+        c.clip()
+        let bg = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            colors: [NSColor(srgbRed: 0.10, green: 0.11, blue: 0.17, alpha: 1).cgColor,
+                                     NSColor(srgbRed: 0.03, green: 0.04, blue: 0.07, alpha: 1).cgColor] as CFArray,
+                            locations: [0, 1])!
+        c.drawLinearGradient(bg, start: CGPoint(x: 0, y: size), end: .zero, options: [])
+        c.addPath(screenPath)
+        c.setFillColor(NSColor(srgbRed: 0.05, green: 0.06, blue: 0.10, alpha: 1).cgColor)
+        c.fillPath()
+        c.setFillColor(NSColor(white: 0.55, alpha: 0.9).cgColor)
+        c.fill(rect(470, 222, 84, 78))
+        c.fill(rect(392, 180, 240, 42))
+    }
+
+    // the screen edge in the blue → green → orange of the app icon
+    static let idleEdge = render { c in
+        c.addPath(screenPath)
+        c.setLineWidth(edgeWidth)
+        c.replacePathWithStrokedPath()
+        c.clip()
+        let colors = [Light.attention, .done, .working].map(\.color.cgColor)
+        let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: colors as CFArray, locations: [0, 0.5, 1])!
+        c.drawLinearGradient(grad, start: CGPoint(x: screen.minX, y: screen.maxY), end: CGPoint(x: screen.maxX, y: screen.minY), options: [])
+    }
+
+    static func edge(_ color: NSColor) -> CGImage {
+        render { c in
+            c.addPath(screenPath)
+            c.setLineWidth(edgeWidth)
+            c.setStrokeColor(color.cgColor)
+            c.strokePath()
+        }
+    }
+
+    // the colour spilling onto the screen and around it
+    static func glow(_ color: NSColor) -> CGImage {
+        render { c in
+            c.addPath(screenPath)
+            c.setFillColor(color.withAlphaComponent(0.3).cgColor)
+            c.fillPath()
+            c.setShadow(offset: .zero, blur: 3, color: color.cgColor)
+            c.addPath(screenPath)
+            c.setLineWidth(edgeWidth)
+            c.setStrokeColor(color.cgColor)
+            c.strokePath()
+        }
+    }
+}
+
+// Sits on the status item's button and lets its clicks through. In layers, so it can breathe without image redraws.
+final class MenuBarIconView: NSView {
+    private let base = CALayer()
+    private let edge = CALayer()
+    private let glow = CALayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // layer before wantsLayer = a layer-hosting view: AppKit leaves our layer tree alone
+        layer = CALayer()
+        wantsLayer = true
+        base.contents = MenuBarIcon.base
+        for l in [base, glow, edge] {
+            l.contentsScale = 2
+            l.contentsGravity = .resize
+            l.frame = CGRect(x: 0, y: 0, width: MenuBarIcon.size, height: MenuBarIcon.size)
+            layer!.addSublayer(l)
+        }
+        show(.idle)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(_ light: Light) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let lit = light != .idle
+        edge.contents = lit ? MenuBarIcon.edge(light.color) : MenuBarIcon.idleEdge
+        glow.contents = lit ? MenuBarIcon.glow(light.color) : nil
+        edge.opacity = 1
+        glow.opacity = 1
+        CATransaction.commit()
+    }
+
+    // level: 0...1, the breath's position
+    func breathe(_ level: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edge.opacity = Float(0.35 + 0.65 * level)
+        glow.opacity = Float(level)
+        CATransaction.commit()
+    }
+}
+
 // MARK: - keyboard
 
 // which keyboards to drive: those whose name contains this
@@ -768,12 +920,13 @@ struct AgentRow: Identifiable, Equatable {
     let note: String?
 }
 
-enum PanelAction { case dismissDone, toggleAgent(Int), showAgents(Bool), toggleAbsentAgents, toggleDisplay(String), askKeyboardAccess, toggleLogin, quit }
+enum PanelAction { case dismissDone, dismissKeyboardDone, fitToContent, toggleAgent(Int), showAgents(Bool), toggleAbsentAgents, toggleDisplay(String), askKeyboardAccess, toggleLogin, quit }
 
 // what the panel shows; the app delegate fills it in and carries out the actions
 final class PanelModel: ObservableObject {
     @Published var isOpen = false
     @Published var doneOnScreen = false
+    @Published var doneOnKeyboard = false
     @Published var keyboardName: String?
     @Published var keyboardSync = KeyboardSettings.Sync.noCable
     @Published var keyboardNeedsAccess = false
@@ -888,7 +1041,7 @@ struct LightPreview: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: nil, paused: !animating)) { _ in
-            let t = CACurrentMediaTime()   // the clock the screen glow and menu bar dot use, so all three breathe together
+            let t = CACurrentMediaTime()   // the clock the screen glow and menu bar icon use, so all three breathe together
             let a = level * (0.35 + 0.65 * Double(wave(t, style.period)))
             let color = Color(nsColor: style.light.color)
             ZStack {
@@ -1044,7 +1197,7 @@ struct PanelContent: View {
                 }
                 .padding(.top, 10)
                 brightness.padding(.top, 12)
-                if st.light == .done { doneDelay.padding(.top, 10) }
+                if st.light == .done { doneDelays.padding(.top, 10) }
                 list.padding(.top, 14)
             }
         }
@@ -1059,7 +1212,7 @@ struct PanelContent: View {
         HStack(spacing: 6) {
             ForEach(styles, id: \.onKey) { s in
                 let sel = s.light == model.selected
-                Button { model.selected = s.light } label: {
+                Button { model.selected = s.light; model.perform(.fitToContent) } label: {
                     HStack(spacing: 6) {
                         Circle().fill(Color(nsColor: s.light.color)).frame(width: 8, height: 8)
                         Text(s.light.label).font(.system(size: 12))
@@ -1112,23 +1265,35 @@ struct PanelContent: View {
         }
     }
 
-    private var doneDelay: some View {
+    private var doneDelays: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            doneDelay(L("屏幕绿光自动关闭", "Turn off screen glow"),
+                      info: L("你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭。\n仅作用于屏幕。菜单栏图标保持绿色，直到下一项任务开始。",
+                              "While you are away the glow stays on. Once you use the mouse or keyboard again, it turns off after the chosen time.\nScreen only: the menu bar icon stays green until the next task starts."),
+                      key: "doneScreenDelay", isOn: model.doneOnScreen, turnOff: .dismissDone)
+            doneDelay(L("键盘绿光自动关闭", "Turn off keyboard light"),
+                      info: L("你离开电脑期间，键盘绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭。\n关闭后，键盘恢复未执行任务时的灯效。菜单栏图标保持绿色，直到下一项任务开始。",
+                              "While you are away the keyboard stays green. Once you use the mouse or keyboard again, it turns off after the chosen time.\nThe keyboard then goes back to its look between tasks. The menu bar icon stays green until the next task starts."),
+                      key: "doneKeyboardDelay", isOn: model.doneOnKeyboard, turnOff: .dismissKeyboardDone)
+        }
+    }
+
+    private func doneDelay(_ title: String, info: String, key: String, isOn: Bool, turnOff: PanelAction) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text(L("屏幕绿光自动关闭", "Turn off screen glow")).font(.system(size: 12)).foregroundColor(Ink.muted)
-                InfoButton(text: L("你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭。\n仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。",
-                                   "While you are away the glow stays on. Once you use the mouse or keyboard again, it turns off after the chosen time.\nScreen only: the keyboard and the menu bar icon stay green until the next task starts."))
+                Text(title).font(.system(size: 12)).foregroundColor(Ink.muted)
+                InfoButton(text: info)
                 Spacer(minLength: 6)
-                // only while the green glow is on the screen
-                if model.doneOnScreen {
-                    Button(L("立即关闭", "Turn off now")) { model.perform(.dismissDone) }
+                // only while the green light is on
+                if isOn {
+                    Button(L("立即关闭", "Turn off now")) { model.perform(turnOff) }
                         .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundColor(accent)
                 }
             }
             HStack(spacing: 6) {
                 ForEach(delays, id: \.seconds) { d in
-                    let sel = model.double("doneScreenDelay").wrappedValue == d.seconds
-                    Button { model.double("doneScreenDelay").wrappedValue = d.seconds } label: {
+                    let sel = model.double(key).wrappedValue == d.seconds
+                    Button { model.double(key).wrappedValue = d.seconds } label: {
                         Text(d.title).font(.system(size: 11, weight: sel ? .medium : .regular))
                             .foregroundColor(sel ? .white : Ink.muted)
                             .frame(maxWidth: .infinity).padding(.vertical, 5)
@@ -1416,8 +1581,7 @@ func secondsSinceInput() -> TimeInterval {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    private let dot = CALayer()
-    private let halo = CALayer()
+    private let iconView = MenuBarIconView()
     private var windows: [GlowWindow] = []
     private var sessions: [Session] = []
     private var state = Light.idle
@@ -1426,10 +1590,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var fadeStart: CFTimeInterval?   // the screen glow is fading out
     private var keyboardState: Light?   // what the keyboard was last told
     private var keyboardLive = KeyboardLive()
-    // done on the screen goes dark once you have been back for a while; the keyboard and menu bar keep it
-    private var doneSeenThrough = Date.distantPast   // done states written up to here have been seen
-    private var doneShown: (stamp: Date, at: Date)?  // the newest done state and when it appeared
-    private var backSince: Date?                     // first input after it appeared
+    // green on the screen and on the keyboard each go dark on their own timer; the menu bar keeps it
+    private var screenDone = DoneWatch()
+    private var keyboardDone = DoneWatch()
     private var sliderPreview: (light: Light, until: Date)?
     private var animTimer: Timer?
     private let defaults = UserDefaults.standard
@@ -1469,7 +1632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         defaults.register(defaults: ["glowAttention": true, "glowDone": true, "glowWorking": true, "keyboardKeysBreathe": false,
-                                      "keyboardAttention": true, "keyboardDone": true, "keyboardWorking": true, "doneScreenDelay": 8.0,
+                                      "keyboardAttention": true, "keyboardDone": true, "keyboardWorking": true, "doneScreenDelay": 8.0, "doneKeyboardDelay": -1.0,
                                       "levelAttention": 1.0, "levelDone": 0.35, "levelWorking": 0.35])
         // the old menu had one switch for the whole keyboard; it is now a switch per state
         if defaults.object(forKey: "keyboardSync") as? Bool == false {
@@ -1494,7 +1657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         buildWindows()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
-        setUpDot()
+        setUpIcon()
         keyboardSettings.liveKeysChanged = { [weak self] in self?.keyboard.apply(); self?.refreshPanel() }
         keyboardSettings.currentPayload = { [weak self] in self?.keyboardPayload() ?? [] }
         keyboardSettings.start()
@@ -1549,11 +1712,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func syncKeyboard(force: Bool = false) {
-        let want = strongest { self.defaults.bool(forKey: $0.keyboardKey) } ?? .idle
+        let doneOn = doneOnKeyboard()
+        let want = strongest { self.defaults.bool(forKey: $0.keyboardKey) && ($0.light != .done || doneOn) } ?? .idle
         var live = KeyboardLive(light: want, compose: false, kana: true)   // keys and ring dark
         if defaults.bool(forKey: "keyboardKeysBreathe") {
             // they show the most urgent state even when its top lights are off
-            let top = sessions.map(\.light).max() ?? .idle
+            let top = strongest { $0.light != .done || doneOn } ?? .idle
             live = KeyboardLive(light: top, compose: true, kana: style(top).map { defaults.bool(forKey: $0.keyboardKey) } ?? true)
         }
         guard force || want != keyboardState || live != keyboardLive else { return }
@@ -1567,29 +1731,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if force { keyboard.apply() }
     }
 
-    // false once you have been back at the computer for the chosen time since the newest done state appeared
+    private var newestDone: Date? { sessions.filter { $0.light == .done }.map(\.changed).max() }
+
     private func doneOnScreen() -> Bool {
-        guard let newest = sessions.filter({ $0.light == .done }).map(\.changed).max(), newest > doneSeenThrough else {
-            doneShown = nil
-            backSince = nil
-            return false
-        }
-        let now = Date()
-        if doneShown?.stamp != newest {
-            doneShown = (newest, now)
-            backSince = nil
-        }
-        let delay = defaults.double(forKey: "doneScreenDelay")
-        if delay < 0 { return true }
-        if backSince == nil, let shown = doneShown, now.addingTimeInterval(-secondsSinceInput()) > shown.at {
-            backSince = now
-        }
-        if let back = backSince, now.timeIntervalSince(back) >= delay {
-            doneSeenThrough = newest
-            lumenLog("screen: done seen, green glow off")
-            return false
-        }
-        return true
+        let before = screenDone.seenThrough
+        let on = screenDone.stillOn(newest: newestDone, delay: defaults.double(forKey: "doneScreenDelay"), idleFor: secondsSinceInput())
+        if screenDone.seenThrough != before { lumenLog("screen: done seen, green glow off") }
+        return on
+    }
+
+    private func doneOnKeyboard() -> Bool {
+        let before = keyboardDone.seenThrough
+        let on = keyboardDone.stillOn(newest: newestDone, delay: defaults.double(forKey: "doneKeyboardDelay"), idleFor: secondsSinceInput())
+        if keyboardDone.seenThrough != before { lumenLog("keyboard: done seen, green light off") }
+        return on
     }
 
     private func buildWindows() {
@@ -1599,16 +1754,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         glow = nil
     }
 
-    // a coloured dot drawn as layers inside the menu bar button, so it can breathe without image redraws
-    private func setUpDot() {
+    private func setUpIcon() {
         guard let button = item.button else { return }
-        button.wantsLayer = true
-        halo.frame = CGRect(x: 0, y: 0, width: 16, height: 16)
-        halo.cornerRadius = 8
-        dot.frame = CGRect(x: 0, y: 0, width: 9, height: 9)
-        dot.cornerRadius = 4.5
-        button.layer?.addSublayer(halo)
-        button.layer?.addSublayer(dot)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(iconView)
+        NSLayoutConstraint.activate([iconView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                                     iconView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                                     iconView.widthAnchor.constraint(equalToConstant: MenuBarIcon.size),
+                                     iconView.heightAnchor.constraint(equalToConstant: MenuBarIcon.size)])
     }
 
     private func tick() {
@@ -1620,31 +1773,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         state = sessions.map(\.light).max() ?? .idle
         if state != shownState {
             shownState = state
-            showDot()
+            iconView.show(state)
         }
         syncKeyboard()
         updateGlow()
         updateAnimating()
         if popover.isShown { refreshPanel() }
-    }
-
-    // menu bar dot: coloured when busy or done, a hollow ring when idle; animate() makes it breathe
-    private func showDot() {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if let b = item.button?.bounds {
-            halo.position = CGPoint(x: b.midX, y: b.midY)
-            dot.position = CGPoint(x: b.midX, y: b.midY)
-        }
-        let lit = state != .idle
-        item.button?.image = lit ? nil : idleIcon()
-        dot.isHidden = !lit
-        halo.isHidden = !lit
-        dot.backgroundColor = state.color.cgColor
-        halo.backgroundColor = state.color.withAlphaComponent(0.35).cgColor
-        dot.opacity = 1
-        halo.opacity = 1
-        CATransaction.commit()
     }
 
     private func updateGlow() {
@@ -1675,7 +1809,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    // fast frames only while something moves: 30 fps for the screen glow, 10 fps for the menu bar dot
+    // fast frames only while something moves: 30 fps for the screen glow, 10 fps for the menu bar icon
     private func updateAnimating() {
         let interval: TimeInterval? = glow != nil ? 1.0 / 30 : state != .idle ? 1.0 / 10 : nil
         if animTimer?.timeInterval == interval { return }
@@ -1686,40 +1820,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             RunLoop.main.add(timer, forMode: .common)
             animTimer = timer
         } else {
-            showDot()   // settle the dot
+            iconView.show(state)   // settle the icon
         }
     }
 
     // Core Animation's own animations never draw in the background glow window, so the app drives every frame
     private func animate() {
         let t = CACurrentMediaTime()
-        if let st = style(state) {
-            let w = wave(t, st.period)
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            dot.opacity = Float(0.35 + 0.65 * w)
-            halo.opacity = Float(w)
-            CATransaction.commit()
-        }
+        if let st = style(state) { iconView.breathe(wave(t, st.period)) }
         guard let glow, let st = style(glow) else { return }
         let top = CGFloat(defaults.double(forKey: st.levelKey))
         var level = top * (0.35 + 0.65 * wave(t, st.period))
         if let f = fadeStart { level *= CGFloat(max(0, 1 - (t - f) / fadeSeconds)) }
         windows.forEach { $0.glow.setLevel(level) }
         if let f = fadeStart, t - f >= fadeSeconds { updateGlow() }
-    }
-
-    // hollow ring that follows the menu bar's light/dark look
-    private func idleIcon() -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { r in
-            let ring = NSBezierPath(ovalIn: r.insetBy(dx: 4.5, dy: 4.5))
-            NSColor.black.setStroke()
-            ring.lineWidth = 1.5
-            ring.stroke()
-            return true
-        }
-        image.isTemplate = true
-        return image
     }
 
     // MARK: panel
@@ -1760,6 +1874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func refreshPanel() {
         show(\.doneOnScreen, glow == .done && fadeStart == nil && sliderPreview == nil)
+        show(\.doneOnKeyboard, keyboardLive.light == .done && !keyboard.names.isEmpty)
         // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
         show(\.keyboardName, keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) })
         show(\.keyboardSync, keyboardSettings.status)
@@ -1807,8 +1922,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func perform(_ action: PanelAction) {
         switch action {
         case .dismissDone:
-            if let newest = sessions.filter({ $0.light == .done }).map(\.changed).max() { doneSeenThrough = newest }
+            if let newest = newestDone { screenDone.seenThrough = newest }
             tick()
+        case .dismissKeyboardDone:
+            if let newest = newestDone { keyboardDone.seenThrough = newest }
+            tick()
+        case .fitToContent:
+            fitPanel()
         case .toggleAgent(let i):
             let t = targets[i]
             let install = t.status != .lumen

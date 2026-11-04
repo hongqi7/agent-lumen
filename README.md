@@ -20,7 +20,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 | 🔵 **待确认** | AI 助手正在等你批准操作或回答问题 | 蓝色呼吸灯，周期 1.2 秒 |
 | 🟠 **执行中** | AI 助手正在思考、运行命令或修改文件 | 橙色呼吸灯，周期 2 秒 |
 | 🟢 **已完成** | AI 助手已完成本轮任务，等你查看结果 | 绿色呼吸灯，周期 3 秒 |
-| 空闲 | 暂无进行中的任务 | 菜单栏显示空心圆圈；屏幕边缘不亮；键盘恢复你原本设置的灯效 |
+| 空闲 | 暂无进行中的任务 | 菜单栏显示 App 图标；屏幕边缘不亮；键盘恢复你原本设置的灯效 |
 
 三个位置使用同一条明暗曲线（取自键盘固件），节奏完全一致。
 
@@ -32,7 +32,8 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 - **显示位置**：「屏幕边缘」「键盘呼吸灯」分别控制该状态是否在屏幕边缘和键盘呼吸灯上发光，点一下切换。键盘呼吸灯在 Halo65 V2 上指左上角灯条，在 Air60 V2 上指两侧灯条。第三个方块「按键背光」控制按键和光环（HALO 标志没有独立灯珠，随光环亮灭），三种状态共用：使用 2026-11-04 之后的 Halo65 V2 固件时，关闭后按键和光环全黑；旧固件关闭后只是不再显示状态颜色，按键恢复键盘自身的灯效（NuPhy 默认灯效只点亮 F、J、↑，呈蓝色）。
 - **发光的显示器**：连接两台及以上显示器时，面板中列出每台显示器，点按钮分别选择是否发光，对三种状态统一生效。设置按显示器记录，拔掉再接上、重启电脑后保持不变；新接入的显示器默认发光。
 - **亮度**：每种状态各有一个亮度。拖动滑块时，预览和屏幕边缘立即按新亮度显示；键盘通过 USB 有线连接时同步调整。
-- **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。仅作用于屏幕；键盘和菜单栏图标保持绿色，直到下一项任务开始。之后如有其他会话完成，绿光重新显示。绿光显示期间，「已完成」页的这一项旁边有「立即关闭」按钮。
+- **屏幕绿光自动关闭**：你离开电脑期间，绿光保持显示。你回到电脑前、操作鼠标或键盘后，按所选时间关闭，可选「立即」「8 秒后」「30 秒后」「不关闭」，默认 8 秒后。之后如有其他会话完成，绿光重新显示。绿光显示期间，这一项旁边有「立即关闭」按钮。
+- **键盘绿光自动关闭**：规则和选项与屏幕相同，两者各自计时，默认「不关闭」。关闭后键盘恢复未执行任务时的灯效。菜单栏图标不受这两项影响，保持绿色直到下一项任务开始。
   - 判断你是否在电脑前，只读取系统记录的「距上次操作的秒数」，不需要额外权限，不读取按键内容。
 - **外观**：设置面板默认跟随系统，macOS 切换浅色或深色（夜间）外观时自动跟着变；也可用面板底部「外观」的三个按钮固定为浅色或深色。只影响设置面板，不影响屏幕边缘发光、键盘灯和菜单栏图标。
 - **AI 助手**：面板中的这一行显示已接入的工具，点开后可用开关逐个接入或断开。开关后不用重启 App；已打开的会话需重新打开后生效。没装的工具折叠在底部。
@@ -66,7 +67,7 @@ Codex、Gemini CLI、Qoder、ZCode 是 v1.9.0 新增的，按各工具的官方�
    ```
 3. 打开后，App 会列出检测到的 AI 工具，询问是否连接，点「接入」。修改前会自动备份原配置文件（文件名为 `*.bak-agent-lumen-时间戳`，保留最早的一份和最近的四份）。App 只改文件里的 `hooks` 一段，其余内容、键的顺序和注释都不动；`hooks` 一段里的注释不会保留。配置文件是软链接时，链接保持不变，改动写入它指向的文件。
 4. 连接前已经打开的会话，需要重新打开后才会触发灯光。
-5. 菜单栏出现一个小圆点即表示 App 正在运行。点击它可打开设置面板。
+5. 菜单栏出现 App 小图标即表示 App 正在运行，图标里的屏幕边框随状态变色并呼吸。点击它可打开设置面板。
 
 > 菜单栏图标较多时，新图标可能被 Bartender、Ice 等工具折叠，请把它拖出来。
 
@@ -123,10 +124,10 @@ You hand a task to Claude Code, Codex, Gemini CLI or another agent and switch to
 | 🟠 **Working**: thinking or running tools | orange, breathing |
 | 🟢 **Done** | green, slow breathing |
 
-The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
+The menu bar icon (the app icon, whose screen edge takes the state's colour), the screen glow and a NuPhy keyboard flashed with [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) all use the same breathing curve and timing.
 
 - Each colour has an on/off switch and a stepless brightness slider (drag to preview).
-- Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard and menu bar stay green until the next task. Presence is read from the system idle time only, never from keystrokes.
+- Green goes away once you've seen it: if you're away when a task finishes, the screen stays green until you're back; after you touch the mouse or keyboard it fades out 8 seconds later (or at once, after 30 seconds, or never: your choice in the panel). The keyboard has the same choice on its own timer, set to never by default. The menu bar stays green until the next task. Presence is read from the system idle time only, never from keystrokes.
 - The settings panel follows the system's light or dark appearance, or can be pinned to either.
 - With two or more displays, choose which of them glow; the choice is remembered per display.
 - Choose per state whether it shows on the screen edges and the keyboard's top lights (the top left strip on a Halo65 V2, the side lights on an Air60 V2). A third tile controls the keys and the halo ring, shared by all three states: with Halo65 V2 firmware from 2026-11-04 on, off means dark and switches right away over Bluetooth too (connect over USB once first); older firmware applies it over USB and shows the keyboard's own key effect when off. Click the menu bar icon to open the settings panel.
