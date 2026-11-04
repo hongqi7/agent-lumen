@@ -4,7 +4,7 @@
 #   ./build.sh install    -> also copy the app to /Applications and open it
 set -euo pipefail
 
-VERSION="1.9.2"
+VERSION="1.9.3"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$HERE/build"
 APP="$BUILD/Agent Lumen.app"
@@ -51,7 +51,10 @@ echo "built: $APP"
 echo "zip:   $ZIP"
 
 if [ "${1:-}" = "install" ]; then
+    # SIGTERM lets the app hand the keyboard lights back. Wait for it: a second copy opened too early exits on its own
     pkill -x AgentLumen 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x AgentLumen >/dev/null || break; sleep 0.2; done
+    pkill -9 -x AgentLumen 2>/dev/null || true
     rm -rf "/Applications/Agent Lumen.app"
     cp -R "$APP" /Applications/
     # macOS ties Input Monitoring to the signature, and an ad-hoc one changes with every build. Signing the

@@ -15,7 +15,10 @@ sid=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head 
 sid=${sid//\//_}
 
 case "$1" in
-    working|done|attention) echo "$1" > "$DIR/$sid" ;;
+    working|done|attention)
+        # write, then rename: the app polls this folder and must never read a half-written file
+        tmp="$DIR/.$sid.$$"
+        echo "$1" > "$tmp" && mv -f "$tmp" "$DIR/$sid" ;;
     end) rm -f "$DIR/$sid" ;;
 esac
 

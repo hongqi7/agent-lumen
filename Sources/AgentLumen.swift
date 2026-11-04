@@ -14,6 +14,8 @@ let lumenSessions = lumenDir + "/sessions"
 let legacySessions = home + "/.claude/claude-light/sessions"
 let hookPath = lumenDir + "/lumen-hook"
 let staleSeconds: TimeInterval = 120 * 60   // a busy session silent for 2 hours was interrupted: count it as done
+// waiting for you can rightly last hours, but a prompt dismissed with Esc never reports again, so it can't stay blue for good
+let attentionStaleSeconds: TimeInterval = 24 * 60 * 60
 let loginLabel = "io.github.hongqi7.agent-lumen"
 let loginAgentPath = home + "/Library/LaunchAgents/\(loginLabel).plist"
 
@@ -73,10 +75,12 @@ func readSessions(includeLegacy: Bool) -> [Session] {
             else { continue }
             var light = Light(word: text.trimmingCharacters(in: .whitespacesAndNewlines))
             if light == .idle { continue }
-            if light > .done && now.timeIntervalSince(mtime) > staleSeconds { light = .done }
             let target = targets.first { !$0.arg.isEmpty && name.hasPrefix($0.arg + "-") } ?? targets[0]
-            // an agent that never reports a session's end can't clear its last state: let it go in time
-            if !target.reportsEnd && now.timeIntervalSince(mtime) > staleSeconds { continue }
+            if now.timeIntervalSince(mtime) > (light == .attention ? attentionStaleSeconds : staleSeconds) {
+                // an agent that never reports a session's end can't clear its last state: let it go in time
+                if !target.reportsEnd { continue }
+                light = .done
+            }
             out.append(Session(agent: target.name, light: light, changed: mtime))
         }
     }
@@ -92,6 +96,13 @@ let breatheTable: [UInt8] = [
     73, 69, 65, 61, 57, 53, 49, 45, 42, 39, 36, 33, 30, 27, 24, 22, 20, 18, 16, 14, 12, 10, 9, 8,
     7, 6, 5, 4, 3, 2, 1, 0,
 ]
+
+// follows links, so a settings file linked into a dotfiles repo still shows its edits
+func fileModified(_ path: String) -> Date? {
+    var s = stat()
+    guard stat(path, &s) == 0 else { return nil }
+    return Date(timeIntervalSince1970: TimeInterval(s.st_mtimespec.tv_sec) + TimeInterval(s.st_mtimespec.tv_nsec) / 1e9)
+}
 
 // a small diagnostics log, ~/.agent-lumen/lumen.log, trimmed to its last 200 lines
 func lumenLog(_ text: String) {
@@ -155,7 +166,7 @@ struct AgentTarget {
         let data = FileManager.default.contents(atPath: settings) ?? Data()
         let text = String(decoding: data, as: UTF8.self)
         guard text.contains("lumen-hook") || installed else { return .absent }   // still connected: keep it offered
-        if !data.isEmpty, (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] == nil { return .broken }
+        if !data.isEmpty, parseSettings(data) == nil { return .broken }
         if text.contains("lumen-hook") { return .lumen }
         if text.contains("claude-light") { return .legacy }   // the older standalone keyboard-light hooks
         return .off
@@ -204,21 +215,131 @@ let targets = [
 
 enum HookError: Error { case unreadable(String) }
 
+// the file a settings path really is. A link into a dotfiles repo must stay a link: an atomic write would replace it.
+// Unlike resolvingSymlinksInPath, this also follows a link whose target doesn't exist yet.
+func followLinks(_ path: String) -> String {
+    var p = path
+    for _ in 0..<32 {
+        guard let next = try? FileManager.default.destinationOfSymbolicLink(atPath: p) else { break }
+        p = next.hasPrefix("/") ? next : ((p as NSString).deletingLastPathComponent as NSString).appendingPathComponent(next)
+    }
+    return p
+}
+
+// the same bytes with // and /* */ comments blanked out (Gemini CLI allows them), so offsets match the original
+func blankComments(_ data: Data) -> [UInt8] {
+    var b = [UInt8](data)
+    var i = 0
+    var inString = false
+    while i < b.count {
+        let c = b[i]
+        if inString {
+            if c == 0x5C { i += 1 } else if c == 0x22 { inString = false }   // \ skips the next byte
+        } else if c == 0x22 {
+            inString = true
+        } else if c == 0x2F, i + 1 < b.count, b[i + 1] == 0x2F || b[i + 1] == 0x2A {
+            let block = b[i + 1] == 0x2A
+            var end = i + 2
+            while end < b.count && !(block ? end > i + 2 && b[end - 1] == 0x2A && b[end] == 0x2F : b[end] == 0x0A) { end += 1 }
+            if block { end = min(end + 1, b.count) }
+            for j in i..<end where b[j] != 0x0A { b[j] = 0x20 }
+            i = end - 1
+        }
+        i += 1
+    }
+    return b
+}
+
+func parseSettings(_ data: Data) -> [String: Any]? {
+    (try? JSONSerialization.jsonObject(with: Data(blankComments(data)))) as? [String: Any]
+}
+
+private func isJSONSpace(_ c: UInt8) -> Bool { c == 0x20 || c == 0x0A || c == 0x0D || c == 0x09 }
+
+// where the value of a top-level key sits in comment-free JSON
+func topLevelValueRange(_ b: [UInt8], key: String) -> Range<Int>? {
+    let wanted = Array("\"\(key)\"".utf8)
+    var i = 0, depth = 0
+    var start: Int?
+    while i < b.count {
+        let c = b[i]
+        if c == 0x22 {
+            let from = i
+            i += 1
+            while i < b.count && b[i] != 0x22 { i += b[i] == 0x5C ? 2 : 1 }
+            if depth == 1, start == nil, i < b.count, b[from...i].elementsEqual(wanted) {
+                var j = i + 1
+                while j < b.count && isJSONSpace(b[j]) { j += 1 }
+                if j < b.count && b[j] == 0x3A {   // a key, not a value that happens to read the same
+                    j += 1
+                    while j < b.count && isJSONSpace(b[j]) { j += 1 }
+                    start = j
+                }
+            }
+        } else if c == 0x7B || c == 0x5B {
+            depth += 1
+        } else if c == 0x7D || c == 0x5D || c == 0x2C {
+            if c != 0x2C { depth -= 1 }
+            if let s = start, depth == (c == 0x2C ? 1 : 0) {
+                var end = i
+                while end > s && isJSONSpace(b[end - 1]) { end -= 1 }
+                return s..<end
+            }
+        }
+        i += 1
+    }
+    return nil
+}
+
+// The new file contents. A settings file stays the user's: only the value of "hooks" is replaced, so the key order,
+// formatting and comments everywhere else survive. Falls back to writing the whole file if that can't be done safely.
+func renderSettings(original: Data?, root: [String: Any]) throws -> Data {
+    let options: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    let whole = try JSONSerialization.data(withJSONObject: root, options: options)
+    guard let original, !original.isEmpty, let hooks = root["hooks"] else { return whole }
+    let value = String(decoding: try JSONSerialization.data(withJSONObject: hooks, options: options), as: UTF8.self)
+        .replacingOccurrences(of: "\n", with: "\n  ")   // one level in; a JSON string can't hold a raw line break
+    let b = blankComments(original)
+    var out = [UInt8](original)
+    if let range = topLevelValueRange(b, key: "hooks") {
+        out.replaceSubrange(range, with: Array(value.utf8))
+    } else if let close = b.lastIndex(of: 0x7D), let last = b[..<close].lastIndex(where: { !isJSONSpace($0) }) {
+        let lineBreak = b[(last + 1)..<close].contains(0x0A) ? "" : "\n"
+        let text = (b[last] == 0x7B ? "" : ",") + "\n  \"hooks\": " + value + lineBreak
+        out.insert(contentsOf: Array(text.utf8), at: last + 1)
+    } else {
+        return whole
+    }
+    guard let parsed = parseSettings(Data(out)), NSDictionary(dictionary: parsed).isEqual(to: root) else { return whole }
+    return Data(out)
+}
+
+// Backups sit next to the path the agent uses, not in a dotfiles repo a link may point into. Kept: the oldest
+// (the file as it was before Agent Lumen) and the newest few.
+func backUpSettings(_ realFile: String, settings: String, keepNewest: Int = 4) {
+    let fm = FileManager.default
+    try? fm.copyItem(atPath: realFile, toPath: settings + ".bak-agent-lumen-\(Int(Date().timeIntervalSince1970))")
+    let dir = (settings as NSString).deletingLastPathComponent
+    let prefix = (settings as NSString).lastPathComponent + ".bak-agent-lumen-"
+    let backups = ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasPrefix(prefix) }.sorted()
+    guard backups.count > keepNewest + 1 else { return }
+    for name in backups[1..<(backups.count - keepNewest)] { try? fm.removeItem(atPath: dir + "/" + name) }
+}
+
 // Rewrites one settings file: drops earlier Lumen entries and the older keyboard-light ones (this app drives
 // the keyboard now, so one set of hooks serves both), then (when installing) puts ours first in
 // each event so they never wait behind a slow hook. Backs the file up and keeps its permissions.
 func setHooks(_ t: AgentTarget, install: Bool) throws {
     let fm = FileManager.default
+    let path = followLinks(t.settings)
+    let original = fm.contents(atPath: path)
     var root: [String: Any] = [:]
     var perms: Any?
-    if let data = fm.contents(atPath: t.settings), !data.isEmpty {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw HookError.unreadable(t.settings)
-        }
+    if let data = original, !data.isEmpty {
+        guard let obj = parseSettings(data) else { throw HookError.unreadable(t.settings) }
         root = obj
-        perms = try? fm.attributesOfItem(atPath: t.settings)[.posixPermissions]
-        let stamp = Int(Date().timeIntervalSince1970)
-        try? fm.copyItem(atPath: t.settings, toPath: t.settings + ".bak-agent-lumen-\(stamp)")
+        perms = try? fm.attributesOfItem(atPath: path)[.posixPermissions]
+        backUpSettings(path, settings: t.settings)
     }
     var container = root["hooks"] as? [String: Any] ?? [:]
     var hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
@@ -248,10 +369,10 @@ func setHooks(_ t: AgentTarget, install: Bool) throws {
         container = hooks
     }
     root["hooks"] = container
-    let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .withoutEscapingSlashes])
-    try fm.createDirectory(atPath: (t.settings as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-    try data.write(to: URL(fileURLWithPath: t.settings), options: .atomic)
-    if let perms { try? fm.setAttributes([.posixPermissions: perms], ofItemAtPath: t.settings) }
+    let data = try renderSettings(original: original, root: root)
+    try fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    if let perms { try? fm.setAttributes([.posixPermissions: perms], ofItemAtPath: path) }
 }
 
 // The hook lives at a fixed path outside the app, so moving the app never breaks the agents' settings.
@@ -382,6 +503,9 @@ final class GlowWindow: NSWindow {
 
 // MARK: - keyboard
 
+// which keyboards to drive: those whose name contains this
+var keyboardNameMatch: String { UserDefaults.standard.string(forKey: "keyboardName") ?? "NuPhy" }
+
 // NuPhy keyboards running the claude-light firmware (github.com/hongqi7/nuphy-air60-v2-claude-light) read the
 // state from two indicator bits macOS never uses: Num Lock = working, Scroll Lock = done, both = needs you.
 // The bits travel over USB, Bluetooth and 2.4G alike. A reconnecting keyboard starts with them cleared,
@@ -412,7 +536,6 @@ final class KeyboardLight {
     private var opened = false
     private var bits: (num: Bool, scroll: Bool) = (false, false)
     private var live = KeyboardLive()
-    var nameMatch: String { UserDefaults.standard.string(forKey: "keyboardName") ?? "NuPhy" }
 
     init() {
         let match = [kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop, kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard] as CFDictionary
@@ -448,7 +571,7 @@ final class KeyboardLight {
         IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? ""
     }
 
-    func matches(_ d: IOHIDDevice) -> Bool { name(d).localizedCaseInsensitiveContains(nameMatch) }
+    func matches(_ d: IOHIDDevice) -> Bool { name(d).localizedCaseInsensitiveContains(keyboardNameMatch) }
 
     private var devices: [IOHIDDevice] {
         guard let set = IOHIDManagerCopyDevices(manager) else { return [] }
@@ -503,18 +626,26 @@ final class KeyboardLight {
 // (VIA) interface — the wireless module forwards only the lock bits, so this works while the cable is in.
 // The keyboard stores them, so they keep applying over Bluetooth and 2.4G.
 //   'L' 'M' 0x01 <working> <done> <needs you> <flags>  →  echoed back with the stored values, byte 7 = version
+
+// The firmware's version from a raw HID reply, 0 if it's too old to know our command. nil for anything else:
+// VIA or Vial running alongside share this interface, and their replies reach us as well.
+func firmwareVersion(reply r: UnsafePointer<UInt8>, length: Int) -> UInt8? {
+    if length >= 8 && r[0] == 0x4C && r[1] == 0x4D { return r[7] }
+    if length >= 3 && r[0] == 0xFF && r[1] == 0x4D && r[2] == 0x01 { return 0 }   // VIA's "unhandled" echo of our request
+    return nil
+}
+
 final class KeyboardSettings {
     enum Sync { case noCable, synced, oldFirmware, pending }
 
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
     private var opened = false
-    private var buffers: [UnsafeMutablePointer<UInt8>] = []
+    private var listeners: [(device: IOHIDDevice, buffer: UnsafeMutablePointer<UInt8>)] = []
     private var pending: [UInt8]?
     private var lastSent = Date.distantPast
     private(set) var status = Sync.noCable
     var currentPayload: (() -> [UInt8])?     // levels and flags, read fresh each time
     var liveKeysChanged: (() -> Void)?
-    var nameMatch = "NuPhy"
 
     init() {
         let match = [kIOHIDDeviceUsagePageKey: 0xFF60, kIOHIDDeviceUsageKey: 0x61] as CFDictionary
@@ -527,8 +658,9 @@ final class KeyboardSettings {
             // a keyboard just plugged in: give it what was set while it was wireless
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { s.send(force: true) }
         }, me)
-        IOHIDManagerRegisterDeviceRemovalCallback(manager, { ctx, _, _, _ in
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { ctx, _, _, device in
             let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
+            s.stopListening(device)
             DispatchQueue.main.async { if s.devices.isEmpty { s.status = .noCable } }
         }, me)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
@@ -540,7 +672,7 @@ final class KeyboardSettings {
     }
 
     private func matches(_ d: IOHIDDevice) -> Bool {
-        (IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? "").localizedCaseInsensitiveContains(nameMatch)
+        (IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? "").localizedCaseInsensitiveContains(keyboardNameMatch)
     }
 
     private var devices: [IOHIDDevice] {
@@ -552,18 +684,26 @@ final class KeyboardSettings {
 
     // replies tell us whether the firmware understood: ours echoes 'L' 'M', older firmware answers as VIA would
     private func listen(_ device: IOHIDDevice) {
+        guard !listeners.contains(where: { $0.device === device }) else { return }
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
-        buffers.append(buf)
+        listeners.append((device, buf))
         let me = Unmanaged.passUnretained(self).toOpaque()
         IOHIDDeviceRegisterInputReportCallback(device, buf, 64, { ctx, _, _, _, _, report, length in
             let s = Unmanaged<KeyboardSettings>.fromOpaque(ctx!).takeUnretainedValue()
-            let ok = length >= 8 && report[0] == 0x4C && report[1] == 0x4D && report[7] >= 1
-            let version = ok ? report[7] : 0
+            guard let version = firmwareVersion(reply: report, length: length) else { return }
             DispatchQueue.main.async {
-                s.status = ok ? .synced : .oldFirmware
+                s.status = version >= 1 ? .synced : .oldFirmware
                 s.note(version: version)
             }
         }, me)
+    }
+
+    // both this and the report callback run on the main run loop, so no report can be landing in the buffer
+    private func stopListening(_ device: IOHIDDevice) {
+        guard let i = listeners.firstIndex(where: { $0.device === device }) else { return }
+        IOHIDDeviceRegisterInputReportCallback(device, listeners[i].buffer, 64, nil, nil)
+        listeners[i].buffer.deallocate()
+        listeners.remove(at: i)
     }
 
     private func note(version: UInt8) {
@@ -612,14 +752,14 @@ final class KeyboardSettings {
 
 // MARK: - panel
 
-struct DisplayRow: Identifiable {
+struct DisplayRow: Identifiable, Equatable {
     let id: String
     let name: String
     let builtIn: Bool
     let on: Bool
 }
 
-struct AgentRow: Identifiable {
+struct AgentRow: Identifiable, Equatable {
     let id: Int
     let name: String
     let status: AgentTarget.Status
@@ -632,6 +772,7 @@ enum PanelAction { case dismissDone, toggleAgent(Int), showAgents(Bool), toggleA
 
 // what the panel shows; the app delegate fills it in and carries out the actions
 final class PanelModel: ObservableObject {
+    @Published var isOpen = false
     @Published var doneOnScreen = false
     @Published var keyboardName: String?
     @Published var keyboardSync = KeyboardSettings.Sync.noCable
@@ -743,10 +884,11 @@ struct LightPreview: View {
     let onKeyboard: Bool
     let wholeKeyboard: Bool
     let liveKeyboard: Bool     // new firmware: the top lights and the keys with the ring are switched apart
+    let animating: Bool        // a closed popover keeps its view: left running, the timeline costs a quarter of a core
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
+        TimelineView(.animation(minimumInterval: nil, paused: !animating)) { _ in
+            let t = CACurrentMediaTime()   // the clock the screen glow and menu bar dot use, so all three breathe together
             let a = level * (0.35 + 0.65 * Double(wave(t, style.period)))
             let color = Color(nsColor: style.light.color)
             ZStack {
@@ -885,7 +1027,7 @@ struct PanelContent: View {
             } else {
                 LightPreview(style: st, level: UserDefaults.standard.double(forKey: st.levelKey),
                              onScreen: isOn(st.onKey), onKeyboard: isOn(st.keyboardKey), wholeKeyboard: isOn("keyboardKeysBreathe"),
-                             liveKeyboard: model.keyboardLiveKeys)
+                             liveKeyboard: model.keyboardLiveKeys, animating: model.isOpen)
                 tabs.padding(.top, 12)
                 Text(st.help.replacingOccurrences(of: "\n", with: chinese ? "" : " "))
                     .font(.system(size: 12)).foregroundColor(Ink.muted)
@@ -1272,7 +1414,7 @@ func secondsSinceInput() -> TimeInterval {
     CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let dot = CALayer()
     private let halo = CALayer()
@@ -1296,6 +1438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private let panel = PanelModel()
     private var failedAgents = Set<Int>()   // indexes into targets whose last switch couldn't be saved
+    private var statusCache: (stamps: [Date?], at: Date, statuses: [AgentTarget.Status])?
+    private var terminateSignal: DispatchSourceSignal?
 
     // every state breathes in its own colour; each has an on/off switch and a strength slider.
     // strength = brightness at the top of the breath, from a faint glow (0.22) to full (1.0)
@@ -1332,9 +1476,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             styles.forEach { defaults.set(false, forKey: $0.keyboardKey) }
             defaults.removeObject(forKey: "keyboardSync")
         }
+        // pkill and launchd send SIGTERM: quit properly, so the keyboard gets its lights back
+        signal(SIGTERM, SIG_IGN)
+        terminateSignal = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        terminateSignal?.setEventHandler { NSApp.terminate(nil) }
+        terminateSignal?.resume()
         panel.changed = { [weak self] key in self?.settingChanged(key) }
         panel.perform = { [weak self] action in self?.perform(action) }
         popover.behavior = .transient
+        popover.delegate = self
+        // opens, closes and resizes at once, like other menu bar apps (an animated resize also stalls the main thread)
+        popover.animates = false
         applyAppearance()
         popover.contentViewController = NSHostingController(rootView: PanelView(model: panel, styles: styles, delays: doneDelays))
         item.button?.target = self
@@ -1376,9 +1528,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         keyboard.show(.idle)   // hand the lights back to the keyboard's own effects
+        lumenLog("quit: keyboard lights handed back")
     }
 
-    private var legacyHooksInUse: Bool { targets.contains { $0.status == .legacy } }
+    // Reading and parsing every agent's settings is too much for a twice-a-second timer. They're read again when
+    // a file changes, and every 30 s because installing an agent touches no settings file.
+    private func agentStatuses() -> [AgentTarget.Status] {
+        let stamps = targets.map { fileModified($0.settings) }
+        if let c = statusCache, c.stamps == stamps, Date().timeIntervalSince(c.at) < 30 { return c.statuses }
+        let statuses = targets.map(\.status)
+        statusCache = (stamps, Date(), statuses)
+        return statuses
+    }
+
+    private var legacyHooksInUse: Bool { agentStatuses().contains(.legacy) }
 
     // the most urgent state among those switched on for a place (screen or keyboard)
     private func strongest(_ allowed: (GlowStyle) -> Bool) -> Light? {
@@ -1486,7 +1649,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateGlow() {
         var want: Light?
-        if let p = sliderPreview, Date() < p.until {
+        if let p = sliderPreview, Date() >= p.until { sliderPreview = nil }
+        if let p = sliderPreview {
             want = p.light
         } else {
             let done = doneOnScreen()
@@ -1563,22 +1727,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePanel() {
         if popover.isShown { return popover.performClose(nil) }
         guard let button = item.button else { return }
+        statusCache = nil
         tick()
         refreshPanel()
         panel.selected = state == .idle ? .working : state   // open on what is lit now
         panel.onAgentsPage = false
         panel.absentAgentsOpen = false
+        panel.isOpen = true
         fitPanel()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
 
-    // pages switch without animation: an animated popover resize stalls the main thread for over 100 ms
-    private func resizePanelAtOnce() {
-        popover.animates = false
-        fitPanel()
-        popover.animates = true
+    func popoverDidClose(_ notification: Notification) {
+        // the ⓘ popovers inside the panel have their own delegates, so this is only ever the panel
+        panel.isOpen = false
     }
 
     // as tall as the content, but never taller than the screen; beyond that the panel scrolls
@@ -1589,22 +1753,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: panelWidth, height: panel.height)
     }
 
+    // @Published announces every assignment, even of the same value, and each announcement redraws the whole panel
+    private func show<T: Equatable>(_ key: ReferenceWritableKeyPath<PanelModel, T>, _ value: T) {
+        if panel[keyPath: key] != value { panel[keyPath: key] = value }
+    }
+
     private func refreshPanel() {
-        panel.doneOnScreen = glow == .done && fadeStart == nil && sliderPreview == nil
+        show(\.doneOnScreen, glow == .done && fadeStart == nil && sliderPreview == nil)
         // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
-        panel.keyboardName = keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) }
-        panel.keyboardSync = keyboardSettings.status
-        panel.keyboardLiveKeys = keyboard.names.first.map(hasLiveKeys) ?? false
-        panel.keyboardNeedsAccess = !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted
-        panel.agents = targets.enumerated().map { i, t in
-            let status = t.status
-            let waiting = t.needsTrust && status == .lumen && !defaults.bool(forKey: "hooksReported.\(t.arg)")
-            return AgentRow(id: i, name: t.name, status: status, waitingForTrust: waiting, failed: failedAgents.contains(i),
+        show(\.keyboardName, keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) })
+        show(\.keyboardSync, keyboardSettings.status)
+        show(\.keyboardLiveKeys, keyboard.names.first.map(hasLiveKeys) ?? false)
+        show(\.keyboardNeedsAccess, !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted)
+        let statuses = agentStatuses()
+        show(\.agents, targets.enumerated().map { i, t in
+            let waiting = t.needsTrust && statuses[i] == .lumen && !defaults.bool(forKey: "hooksReported.\(t.arg)")
+            return AgentRow(id: i, name: t.name, status: statuses[i], waitingForTrust: waiting, failed: failedAgents.contains(i),
                             note: t.needsTrust && !waiting ? nil : t.note)   // a trust reminder only while it applies
-        }
-        panel.openAtLogin = FileManager.default.fileExists(atPath: loginAgentPath)
+        })
+        show(\.openAtLogin, FileManager.default.fileExists(atPath: loginAgentPath))
         let off = glowOffDisplays
-        panel.displays = Display.all.map { DisplayRow(id: $0.id, name: $0.name, builtIn: $0.builtIn, on: !off.contains($0.id)) }
+        show(\.displays, Display.all.map { DisplayRow(id: $0.id, name: $0.name, builtIn: $0.builtIn, on: !off.contains($0.id)) })
     }
 
     // nil follows the system's light or dark appearance
@@ -1652,14 +1821,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 failedAgents.insert(i)
                 lumenLog("\(t.name): \(error)")
             }
+            statusCache = nil
             refreshPanel()
         case .showAgents(let open):
             panel.onAgentsPage = open
             refreshPanel()
-            resizePanelAtOnce()
+            fitPanel()
         case .toggleAbsentAgents:
             panel.absentAgentsOpen.toggle()
-            resizePanelAtOnce()
+            fitPanel()
         case .askKeyboardAccess:
             // macOS only lets an app set keyboard LEDs with Input Monitoring; the grant applies after a relaunch
             keyboard.requestAccess()

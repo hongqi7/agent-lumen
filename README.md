@@ -64,7 +64,7 @@ Codex、Gemini CLI、Qoder、ZCode 是 v1.9.0 新增的，按各工具的官方�
    ```bash
    xattr -dr com.apple.quarantine "/Applications/Agent Lumen.app"
    ```
-3. 打开后，App 会列出检测到的 AI 工具，询问是否连接，点「接入」。修改前会自动备份原配置文件（文件名为 `*.bak-agent-lumen-时间戳`）。
+3. 打开后，App 会列出检测到的 AI 工具，询问是否连接，点「接入」。修改前会自动备份原配置文件（文件名为 `*.bak-agent-lumen-时间戳`，保留最早的一份和最近的四份）。App 只改文件里的 `hooks` 一段，其余内容、键的顺序和注释都不动；`hooks` 一段里的注释不会保留。配置文件是软链接时，链接保持不变，改动写入它指向的文件。
 4. 连接前已经打开的会话，需要重新打开后才会触发灯光。
 5. 菜单栏出现一个小圆点即表示 App 正在运行。点击它可打开设置面板。
 
@@ -105,9 +105,9 @@ cd agent-lumen
 
 ## 已知限制
 
-- 按 Esc 中断 Claude 时，不会触发「完成」钩子，状态会停在「执行中」；超过 2 小时没有新的状态，会自动按「已完成」处理。
+- 按 Esc 中断 Claude 时，不会触发「完成」钩子，状态会停在「执行中」；超过 2 小时没有新的状态，会自动按「已完成」处理。「待确认」可能本来就要等很久，超过 24 小时才这样处理，所以在批准提示处按 Esc 后如果不再继续这个会话，蓝灯最多保留 24 小时。
 - Claude Code 在回复正文中以文字向你提问（而不是弹出提问框）时，按「已完成」处理。
-- ZCode 没有会话结束事件，关闭窗口后最后的状态最多保留 2 小时。
+- ZCode 没有会话结束事件，关闭窗口后最后的状态最多保留 2 小时（「待确认」最多 24 小时）。
 - Gemini CLI 的钩子文档没有明确写批准提示何时触发，「待确认」以实际表现为准。
 - 只做了 macOS。
 
@@ -131,12 +131,12 @@ The menu bar dot, the screen glow and a NuPhy keyboard flashed with [nuphy-air60
 - With two or more displays, choose which of them glow; the choice is remembered per display.
 - Choose per state whether it shows on the screen edges and the keyboard's top lights (the top left strip on a Halo65 V2, the side lights on an Air60 V2). A third tile controls the keys and the halo ring, shared by all three states: with Halo65 V2 firmware from 2026-11-04 on, off means dark and switches right away over Bluetooth too (connect over USB once first); older firmware applies it over USB and shows the keyboard's own key effect when off. Click the menu bar icon to open the settings panel.
 - The AI agents row opens a page with a switch for each agent, so you choose which ones to connect.
-- Several sessions and agents at once: the most urgent wins (blue > orange > green); the panel lists every agent's sessions.
+- Several sessions and agents at once: the most urgent wins (blue > orange > green).
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
 
 **Supported agents:** Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`; trust the hooks once with `/hooks` or Settings → Hooks in the desktop app), Gemini CLI (`~/.gemini/settings.json`), Qoder (`~/.qoder/settings.json`), WorkBuddy (`~/.workbuddy/settings.json`), Devin local sessions (`~/.config/devin/config.json`; answer Devin's workspace trust prompt), ZCode (`~/.zcode/cli/config.json`; connecting turns on its hooks setting, and disconnecting leaves it on). Codex, Gemini CLI, Qoder and ZCode are new in v1.9.0: built from their official docs and not yet tested on each one. Agent Lumen adds a few hook commands that write a single word to `~/.agent-lumen/sessions/`.
 
-**Install:** download the zip from [Releases](https://github.com/hongqi7/agent-lumen/releases/latest), unzip and move **Agent Lumen.app** to Applications. The app is not notarized, so the first time **right-click → Open → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Agent Lumen.app"`). On first launch it offers to connect the agents it finds and backs up each settings file first. Restart sessions that were already open. macOS 13+, Apple silicon and Intel.
+**Install:** download the zip from [Releases](https://github.com/hongqi7/agent-lumen/releases/latest), unzip and move **Agent Lumen.app** to Applications. The app is not notarized, so the first time **right-click → Open → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Agent Lumen.app"`). On first launch it offers to connect the agents it finds and backs up each settings file first. Only the `hooks` section is rewritten: everything else in the file, including key order and comments, stays as it was, and a settings file that is a symlink stays one. Restart sessions that were already open. macOS 13+, Apple silicon and Intel.
 
 **Disconnect:** switch the agent off under AI agents in the panel, or run `"/Applications/Agent Lumen.app/Contents/MacOS/AgentLumen" --disconnect`. Then delete the app, `~/.agent-lumen` and, if you enabled it, `~/Library/LaunchAgents/io.github.hongqi7.agent-lumen.plist`.
 
