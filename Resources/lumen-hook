@@ -14,11 +14,26 @@ sid=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head 
 [ -n "$2" ] && sid="$2-$sid"
 sid=${sid//\//_}
 
+# ZCode reports no session end, so note its process and let the app see when that has gone. Its command line is
+# what identifies it: from a terminal it runs as "node .../zcode.cjs". The shell running this hook names zcode too.
+pid=""
+if [ "$2" = zcode ]; then
+    p=$PPID
+    while [ "${p:-0}" -gt 1 ]; do
+        read -r ppid cmd <<<"$(ps -o ppid=,command= -p "$p" 2>/dev/null)"
+        case "$cmd" in
+            *lumen-hook*) ;;
+            *[Zz][Cc]ode*) pid=$p; break ;;
+        esac
+        p=$ppid
+    done
+fi
+
 case "$1" in
     working|done|attention)
         # write, then rename: the app polls this folder and must never read a half-written file
         tmp="$DIR/.$sid.$$"
-        echo "$1" > "$tmp" && mv -f "$tmp" "$DIR/$sid" ;;
+        printf '%s\n' "$1" $pid > "$tmp" && mv -f "$tmp" "$DIR/$sid" ;;
     end) rm -f "$DIR/$sid" ;;
 esac
 

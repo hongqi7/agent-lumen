@@ -74,8 +74,15 @@ func readSessions(includeLegacy: Bool) -> [Session] {
             guard let text = try? String(contentsOfFile: path, encoding: .utf8),
                   let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
             else { continue }
-            var light = Light(word: text.trimmingCharacters(in: .whitespacesAndNewlines))
+            // the state, then for an agent with no session end event its process
+            let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            var light = Light(word: lines.first ?? "")
             if light == .idle { continue }
+            if lines.count > 1, let pid = pid_t(lines[1]), kill(pid, 0) != 0, errno == ESRCH {
+                try? fm.removeItem(atPath: path)
+                lumenLog("session cleared, its process has gone: \(name)")
+                continue
+            }
             let target = targets.first { !$0.arg.isEmpty && name.hasPrefix($0.arg + "-") } ?? targets[0]
             if now.timeIntervalSince(mtime) > (light == .attention ? attentionStaleSeconds : staleSeconds) {
                 // an agent that never reports a session's end can't clear its last state: let it go in time
