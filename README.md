@@ -90,6 +90,7 @@ Agent Lumen 也是 [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuph
 - **亮度需在 USB 有线连接时写入键盘**，因为键盘的无线模块只转发指示灯信号。「键盘呼吸灯」「按键背光」用两个闲置的指示灯位传送，Halo65 V2 刷入 2026-11-04 之后的固件并插线连接一次后，蓝牙下也能立即切换；其他固件仍需插线写入按键背光。之后改用蓝牙或 2.4G 无线连接，键盘会继续使用最后一次写入的设置；无线连接期间在面板中修改的设置，会在下次插上 USB 线时自动写入。需要 2026-11-03 之后的键盘固件。
 - **输入监控权限**：第一次连接 NuPhy 键盘时，macOS 会请求「输入监控」权限。这是 macOS 允许 App 设置键盘指示灯的前提。Agent Lumen **只设置指示灯，不读取任何按键**。授权后需重新打开一次 App。
 - **更新 App 后键盘灯不亮**：macOS 把这项权限绑定在 App 的签名上，未付费签名的 App 每个新版本签名都不同，权限会失效。请到「系统设置 → 隐私与安全性 → 输入监控」，选中旧的 Agent Lumen 点「−」删除，再重新打开 App 并点「允许」。诊断日志位于 `~/.agent-lumen/lumen.log`。
+- **装了 Karabiner-Elements 等改键工具，插线时键盘灯不亮**：这类工具会独占它处理的键盘，面板的键盘一行会提示「键盘被其他程序独占」。在 Karabiner 的「Devices」里关掉这把键盘的「Modify events」即可。插线时它可能把同一把键盘列成两项，两项都要关；「连接时禁用内置键盘」之类的其他设置保持不变就行。
 - 自己编译时，`./build.sh install` 会用钥匙串里的 Apple 开发证书（如有）给本机这份 App 签名，这样之后重新编译不会丢失权限。
 - 以前安装过键盘灯项目自带钩子（`claude-light`）的，「AI 助手」页会显示「检测到旧版钩子」。点「更新」，即可换成共享钩子并删除旧钩子；键盘灯项目的后台程序也可以停用了。
 
@@ -144,6 +145,6 @@ The menu bar icon (a monitor with a glowing ring inside, which takes the state's
 
 **Build:** `./build.sh` (needs only the Xcode command line tools). One source file, no dependencies.
 
-**NuPhy keyboard:** Agent Lumen is also the Mac-side controller for [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) (Air60 V2 and Halo65 V2 firmware). It signals the state through the Num Lock / Scroll Lock indicator bits, over USB, Bluetooth or 2.4G, and resends them after a reconnect. macOS asks for Input Monitoring the first time, which is required to set keyboard LEDs. The app never reads keystrokes. Older `claude-light` hooks are replaced with the shared ones when you connect.
+**NuPhy keyboard:** Agent Lumen is also the Mac-side controller for [nuphy-air60-v2-claude-light](https://github.com/hongqi7/nuphy-air60-v2-claude-light) (Air60 V2 and Halo65 V2 firmware). It signals the state through the Num Lock / Scroll Lock indicator bits, over USB, Bluetooth or 2.4G, and resends them after a reconnect. macOS asks for Input Monitoring the first time, which is required to set keyboard LEDs. Key remappers such as Karabiner-Elements can hold a keyboard exclusively; the panel then says so, and turning off Modify events for that keyboard in Karabiner (both entries, if it lists two over USB) fixes it. The app never reads keystrokes. Older `claude-light` hooks are replaced with the shared ones when you connect.
 
 Not affiliated with Anthropic, Tencent or Cognition. MIT License.

@@ -772,6 +772,8 @@ final class KeyboardLight {
 
     // what went wrong last time, so the log shows a change instead of a line every 20 s
     private var lastProblem = ""
+    // another app (Karabiner-Elements and other key remappers) holds a keyboard exclusively, so its LEDs can't be set
+    private(set) var seized = false
 
     private func name(_ d: IOHIDDevice) -> String {
         IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String ?? ""
@@ -798,12 +800,15 @@ final class KeyboardLight {
 
     func apply() {
         guard openIfAllowed() else {
-            let problem = "keyboard: no Input Monitoring (access \(access.rawValue)), lights not sent"
+            let problem = access == kIOHIDAccessTypeGranted
+                ? "keyboard: could not open the keyboards, lights not sent"
+                : "keyboard: no Input Monitoring (access \(access.rawValue)), lights not sent"
             if problem != lastProblem { lumenLog(problem) }
             lastProblem = problem
             return
         }
         var results: [String] = []
+        var heldElsewhere = false
         for d in devices {
             guard let els = IOHIDDeviceCopyMatchingElements(d, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else { continue }
             let isLive = hasLiveKeys(name(d))
@@ -817,9 +822,12 @@ final class KeyboardLight {
                 default:                       continue
                 }
                 let r = IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
+                if r == kIOReturnExclusiveAccess { heldElsewhere = true }
                 if r != kIOReturnSuccess { results.append("\(name(d)) led \(IOHIDElementGetUsage(e)) -> 0x\(String(r, radix: 16))") }
             }
         }
+        seized = heldElsewhere
+        if heldElsewhere { results.append("held exclusively by another app, such as Karabiner-Elements") }
         let problem = devices.isEmpty ? "keyboard: none connected" : results.joined(separator: "; ")
         if problem != lastProblem {
             lumenLog(problem.isEmpty ? "keyboard: lights sent to \(names.joined(separator: ", ")) num=\(bits.num) scroll=\(bits.scroll)" : problem)
@@ -984,6 +992,7 @@ final class PanelModel: ObservableObject {
     @Published var keyboardName: String?
     @Published var keyboardSync = KeyboardSettings.Sync.noCable
     @Published var keyboardNeedsAccess = false
+    @Published var keyboardSeized = false   // another app holds it exclusively
     @Published var keyboardLiveKeys = false   // its key lights can be switched over wireless
     @Published var agents: [AgentRow] = []
     @Published var onAgentsPage = false
@@ -1458,6 +1467,11 @@ struct PanelContent: View {
                                 "macOS requires it to set keyboard LEDs. Agent Lumen only sets the LEDs and never reads keys.")) {
                         Button(L("去开启", "Allow")) { model.perform(.askKeyboardAccess) }.controlSize(.small)
                     }
+                }
+                if model.keyboardSeized {
+                    row("exclamationmark.triangle.fill", L("键盘被其他程序独占", "Held by another app"),
+                        info: L("Karabiner-Elements 等改键工具会独占它所处理的键盘，Agent Lumen 就无法设置指示灯。在 Karabiner 的 Devices 里关掉这把键盘的 Modify events 即可。插线时它可能列出两项，都要关；不用改键的话，其他设置保持不变即可。",
+                                "Key remappers such as Karabiner-Elements take the keyboards they handle for themselves, so Agent Lumen can't set the LEDs. Turn off Modify events for this keyboard under Devices in Karabiner. Over USB it may be listed twice: turn off both.")) { EmptyView() }
                 }
             } else {
                 row("keyboard", L("未连接 NuPhy 键盘", "No NuPhy keyboard"),
@@ -1945,6 +1959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         show(\.keyboardSync, keyboardSettings.status)
         show(\.keyboardLiveKeys, keyboard.names.first.map(hasLiveKeys) ?? false)
         show(\.keyboardNeedsAccess, !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted)
+        show(\.keyboardSeized, !keyboard.names.isEmpty && keyboard.seized)
         let statuses = agentStatuses()
         show(\.agents, targets.enumerated().map { i, t in
             let waiting = t.needsTrust && statuses[i] == .lumen && !defaults.bool(forKey: "hooksReported.\(t.arg)")
