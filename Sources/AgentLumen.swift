@@ -724,8 +724,12 @@ let liveKeysKey = "keyboardsWithLiveKeys"
 func keyboardFamily(_ name: String) -> String {   // the same keyboard as "X", "X-1" and "X Dongle"
     name.replacingOccurrences(of: #"(-\d+| Dongle)$"#, with: "", options: .regularExpression)
 }
+// NuPhy's 2.4G receivers forward an LED report only while it holds nothing beyond Num/Caps/Scroll Lock: one with
+// the Compose or Kana bit is dropped whole, state and all (Bluetooth passes them on). So a keyboard on its receiver
+// gets the plain state, and its keys and halo follow the choices it stored over USB.
+func isReceiver(_ name: String) -> Bool { name.hasSuffix(" Dongle") }
 func hasLiveKeys(_ name: String) -> Bool {
-    (UserDefaults.standard.stringArray(forKey: liveKeysKey) ?? []).contains(keyboardFamily(name))
+    !isReceiver(name) && (UserDefaults.standard.stringArray(forKey: liveKeysKey) ?? []).contains(keyboardFamily(name))
 }
 
 // what a keyboard with protocol 3 is told: the state, and the live choices for its keys and top lights
@@ -817,8 +821,9 @@ final class KeyboardLight {
                 switch Int(IOHIDElementGetUsage(e)) {
                 case kHIDUsage_LED_NumLock:    on = isLive ? live.num : bits.num
                 case kHIDUsage_LED_ScrollLock: on = isLive ? live.scroll : bits.scroll
-                case kHIDUsage_LED_Compose where isLive: on = live.compose
-                case kHIDUsage_LED_Kana where isLive:    on = live.kana
+                // cleared rather than skipped: a bit left set from before would keep a receiver dropping every report
+                case kHIDUsage_LED_Compose:    on = isLive && live.compose
+                case kHIDUsage_LED_Kana:       on = isLive && live.kana
                 default:                       continue
                 }
                 let r = IOHIDDeviceSetValue(d, e, IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, on ? 1 : 0))
