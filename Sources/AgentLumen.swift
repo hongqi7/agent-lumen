@@ -15,7 +15,7 @@ let lumenSessions = lumenDir + "/sessions"
 let legacySessions = home + "/.claude/claude-light/sessions"
 let hookPath = lumenDir + "/lumen-hook"
 let staleSeconds: TimeInterval = 120 * 60   // a busy session silent for 2 hours was interrupted: count it as done
-let presenceGraceSeconds: TimeInterval = 45 // a fresh turn may not have its presence lock yet: don't flip it done too early
+let conversationGraceSeconds: TimeInterval = 15 // let a brand-new conversation create its .db before checking
 // waiting for you can rightly last hours, but a prompt dismissed with Esc never reports again, so it can't stay blue for good
 let attentionStaleSeconds: TimeInterval = 24 * 60 * 60
 let loginLabel = "io.github.hongqi7.agent-lumen"
@@ -85,14 +85,14 @@ func readSessions(includeLegacy: Bool) -> [Session] {
                 continue
             }
             let target = targets.first { !$0.arg.isEmpty && name.hasPrefix($0.arg + "-") } ?? targets[0]
-            // a working/attention session whose conversation lock is gone will never see its end event:
-            // without this it would hold back the green until the long stale window expires
-            if light != .done, let pdir = target.presenceDir,
-               now.timeIntervalSince(mtime) > presenceGraceSeconds,
-               !fm.fileExists(atPath: pdir + "/" + name.dropFirst(target.arg.count + 1) + ".lock") {
-                try? "done\n".write(toFile: path, atomically: true, encoding: .utf8)
-                lumenLog("presence lock gone, counted done: \(name)")
-                light = .done
+            // Antigravity keeps empty presence/*.lock files forever and omits them in CLI/subagents, so check
+            // the conversation .db across all variants instead: missing means the user deleted the conversation.
+            if light != .done, !target.conversationDirs.isEmpty,
+               now.timeIntervalSince(mtime) > conversationGraceSeconds,
+               !target.conversationDirs.contains(where: { fm.fileExists(atPath: "\($0)/\(name.dropFirst(target.arg.count + 1)).db") }) {
+                try? fm.removeItem(atPath: path)
+                lumenLog("conversation deleted, session cleared: \(name)")
+                continue
             }
             if now.timeIntervalSince(mtime) > (light == .attention ? attentionStaleSeconds : staleSeconds) {
                 // an agent that never reports a session's end can't clear its last state: let it go in time
@@ -168,7 +168,7 @@ struct AgentTarget {
     var apps: [String] = []
     var folderMeansInstalled = true
     var needsTrust = false                   // the agent skips new hooks until the user approves them there
-    var presenceDir: String? = nil           // Antigravity: one "<sid>.lock" per open conversation; gone means the turn can't report Stop
+    var conversationDirs: [String] = []      // Antigravity: "<sid>.db" per conversation; deleted from UI removes it
     var note: String? = nil
 
     enum Status { case absent, off, lumen, legacy, broken }
@@ -219,9 +219,11 @@ let targets = [
     // Antigravity shares ~/.gemini with Gemini CLI, so hooks live in config/hooks.json as named groups; stdin uses conversationId
     AgentTarget(name: "Antigravity", configDir: home + "/.gemini", settings: home + "/.gemini/config/hooks.json", arg: "agy",
                 events: [("SessionStart", "working", nil), ("PreInvocation", "working", nil),
+                         ("PreToolUse", "attention", "ask_question"),
                          ("PostToolUse", "working", "*"), ("Stop", "done", nil)],
                 namedGroup: "agent-lumen", commands: ["agy"], apps: ["Antigravity"], folderMeansInstalled: false,
-                presenceDir: home + "/.gemini/antigravity/presence"),
+                conversationDirs: ["antigravity", "antigravity-cli", "antigravity-acp", "antigravity-ide"]
+                    .map { home + "/.gemini/\($0)/conversations" }),
     AgentTarget(name: "Qoder", configDir: home + "/.qoder", settings: home + "/.qoder/settings.json", arg: "qoder",
                 events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
                          ("PermissionRequest", "attention", nil), ("Notification", "attention", "permission_prompt"),
@@ -368,11 +370,7 @@ private func isLumenEntry(_ entry: Any) -> Bool {
 }
 
 private func hookCommand(_ t: AgentTarget, state: String) -> String {
-    if t.namedGroup != nil {
-        let hook = "'" + hookPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return "/usr/bin/jq -c '{session_id:(.conversationId//.session_id//\"\")}' 2>/dev/null | \(hook) \(state) \(t.arg); printf '{}\\n'"
-    }
-    return "\"\(hookPath)\" \(state) \(t.arg)".trimmingCharacters(in: .whitespaces)
+    "\"\(hookPath)\" \(state) \(t.arg)".trimmingCharacters(in: .whitespaces)
 }
 
 // whether a connected agent's hooks differ from what this version of the app would write
@@ -1875,12 +1873,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func syncKeyboard(force: Bool = false) {
-        let doneOn = doneOnKeyboard()
-        let want = strongest { self.defaults.bool(forKey: $0.keyboardKey) && ($0.light != .done || doneOn) } ?? .idle
+        let topBusy = strongest { $0.light > .done && self.defaults.bool(forKey: $0.keyboardKey) }
+        let allBusy = defaults.bool(forKey: "keyboardKeysBreathe") ? strongest { $0.light > .done } : nil
+        let doneOn = (topBusy == nil || (defaults.bool(forKey: "keyboardKeysBreathe") && allBusy == nil)) ? doneOnKeyboard() : false
+        let want = topBusy ?? (doneOn && defaults.bool(forKey: "keyboardDone") && newestDone != nil ? .done : .idle)
         var live = KeyboardLive(light: want, compose: false, kana: true)   // keys and ring dark
         if defaults.bool(forKey: "keyboardKeysBreathe") {
             // they show the most urgent state even when its top lights are off
-            let top = strongest { $0.light != .done || doneOn } ?? .idle
+            let top = allBusy ?? (doneOn && newestDone != nil ? .done : .idle)
             live = KeyboardLive(light: top, compose: true, kana: style(top).map { defaults.bool(forKey: $0.keyboardKey) } ?? true)
         }
         guard force || want != keyboardState || live != keyboardLive else { return }
@@ -1912,8 +1912,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func buildWindows() {
         windows.forEach { $0.orderOut(nil) }
+        let all = Display.all
         let off = glowOffDisplays
-        windows = Display.all.filter { !off.contains($0.id) }.map { GlowWindow(screen: $0.screen) }
+        // The per-display switches only appear while two or more displays are connected; with a single screen
+        // (e.g. a laptop closed onto an external monitor that was turned off in dual-screen mode), never black it out.
+        windows = (all.count > 1 ? all.filter { !off.contains($0.id) } : all).map { GlowWindow(screen: $0.screen) }
         glow = nil
     }
 
@@ -1949,11 +1952,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func updateGlow() {
         var want: Light?
         if let p = sliderPreview, Date() >= p.until { sliderPreview = nil }
-        if let p = sliderPreview {
+        if windows.isEmpty {
+            want = nil
+        } else if let p = sliderPreview {
             want = p.light
         } else {
-            let done = doneOnScreen()
-            want = strongest { self.defaults.bool(forKey: $0.onKey) && ($0.light != .done || done) }
+            let busy = strongest { $0.light > .done && self.defaults.bool(forKey: $0.onKey) }
+            want = busy ?? (doneOnScreen() && defaults.bool(forKey: "glowDone") && newestDone != nil ? .done : nil)
         }
         if want == nil, glow != nil {
             // fade out instead of switching off at once
@@ -2040,10 +2045,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func refreshPanel() {
         show(\.doneOnScreen, glow == .done && fadeStart == nil && sliderPreview == nil)
         show(\.doneOnKeyboard, keyboardLive.light == .done && !keyboard.names.isEmpty)
-        // macOS numbers keyboards with the same name ("NuPhy Air60 V2-1"); the number means nothing to people
-        show(\.keyboardName, keyboard.names.first.map { $0.replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression) })
+        show(\.keyboardName, keyboard.names.first.map(keyboardFamily))
         show(\.keyboardSync, keyboardSettings.status)
-        show(\.keyboardLiveKeys, keyboard.names.first.map(hasLiveKeys) ?? false)
+        show(\.keyboardLiveKeys, keyboard.names.contains(where: hasLiveKeys))
         show(\.keyboardNeedsAccess, !keyboard.names.isEmpty && keyboard.access != kIOHIDAccessTypeGranted)
         show(\.keyboardSeized, !keyboard.names.isEmpty && keyboard.seized)
         let statuses = agentStatuses()

@@ -48,6 +48,7 @@ A glow around your screen edge, and on your NuPhy keyboard, that tells you what 
 | Claude Code（命令行、桌面版 Code 页、IDE 插件） | `~/.claude/settings.json` | |
 | Codex（命令行、桌面版） | `~/.codex/hooks.json` | 接入后需在 Codex 里输入 `/hooks`，或打开桌面版「设置 → Hooks」，信任一次钩子 |
 | Gemini CLI | `~/.gemini/settings.json` | |
+| Antigravity（桌面版、命令行、ACP） | `~/.gemini/config/hooks.json` | |
 | Qoder | `~/.qoder/settings.json` | |
 | WorkBuddy | `~/.workbuddy/settings.json` | |
 | Devin（本机会话） | `~/.config/devin/config.json` | 首次运行时，Devin 会询问是否「信任此工作区」，需选择信任；云端会话不会触发灯光 |
@@ -110,7 +111,7 @@ cd agent-lumen
 - 按 Esc 中断 Claude 时，不会触发「完成」钩子，状态会停在「执行中」；超过 2 小时没有新的状态，会自动按「已完成」处理。「待确认」可能本来就要等很久，超过 24 小时才这样处理，所以在批准提示处按 Esc 后如果不再继续这个会话，蓝灯最多保留 24 小时。
 - Claude Code 弹出提问框、计划确认或屏幕接管确认时，按「待确认」显示。
 - Claude Code 在回复正文中以文字向你提问（而不是弹出提问框）时，按「已完成」处理。
-- ZCode 没有会话结束事件，App 改为查看它的进程，进程退出后清除状态。如果只是关闭窗口而进程还在，最后的状态最多保留 2 小时（「待确认」最多 24 小时）。
+- ZCode 和 Antigravity 没有会话结束事件，App 改为查看它们的进程，进程退出后清除状态；在 Antigravity 里删除会话后也会清除状态。如果只是关闭窗口而进程还在，最后的状态最多保留 2 小时（「待确认」最多 24 小时）。
 - Gemini CLI 的钩子文档没有明确写批准提示何时触发，「待确认」以实际表现为准。
 - 只做了 macOS。
 
@@ -137,7 +138,7 @@ The menu bar icon (a monitor with a glowing ring inside, which takes the state's
 - Several sessions and agents at once: the most urgent wins (blue > orange > green).
 - The glow is click-through and shows on every display and over full-screen apps. About 1% CPU, no network access, no data collection.
 
-**Supported agents:** Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`; trust the hooks once with `/hooks` or Settings → Hooks in the desktop app), Gemini CLI (`~/.gemini/settings.json`), Qoder (`~/.qoder/settings.json`), WorkBuddy (`~/.workbuddy/settings.json`), Devin local sessions (`~/.config/devin/config.json`; answer Devin's workspace trust prompt), ZCode (`~/.zcode/cli/config.json`; connecting turns on its hooks setting, and disconnecting leaves it on). Codex, Gemini CLI, Qoder and ZCode are new in v1.9.0: built from their official docs and not yet tested on each one. Agent Lumen adds a few hook commands that write a single word to `~/.agent-lumen/sessions/`.
+**Supported agents:** Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`; trust the hooks once with `/hooks` or Settings → Hooks in the desktop app), Gemini CLI (`~/.gemini/settings.json`), Antigravity (`~/.gemini/config/hooks.json`), Qoder (`~/.qoder/settings.json`), WorkBuddy (`~/.workbuddy/settings.json`), Devin local sessions (`~/.config/devin/config.json`; answer Devin's workspace trust prompt), ZCode (`~/.zcode/cli/config.json`; connecting turns on its hooks setting, and disconnecting leaves it on). Codex, Gemini CLI, Qoder and ZCode are new in v1.9.0: built from their official docs and not yet tested on each one. Agent Lumen adds a few hook commands that write a single word to `~/.agent-lumen/sessions/`.
 
 **Install:** download the zip from [Releases](https://github.com/hongqi7/agent-lumen/releases/latest), unzip and move **Agent Lumen.app** to Applications. The app is not notarized, so the first time **right-click → Open → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Agent Lumen.app"`). On first launch it offers to connect the agents it finds and backs up each settings file first. Only the `hooks` section is rewritten: everything else in the file, including key order and comments, stays as it was, and a settings file that is a symlink stays one. Restart sessions that were already open. macOS 13+, Apple silicon and Intel.
 

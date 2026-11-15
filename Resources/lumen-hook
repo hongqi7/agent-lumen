@@ -1,30 +1,63 @@
 #!/bin/bash
 # Agent Lumen hook: records one agent session's state for the menu bar app.
-#   lumen-hook working|done|attention|end [agent]     (hook JSON with session_id on stdin)
+#   lumen-hook working|done|attention|end [agent]     (hook JSON with session_id or conversationId on stdin)
 # Called by the hooks of every connected agent. Must stay fast and never fail the hook:
 # in hook protocols exit code 2 means "block", so every path exits 0.
 
 DIR="$HOME/.agent-lumen/sessions"
 mkdir -p "$DIR"
 
+state="$1"
+agent="$2"
 input=$(cat)
-# first match = the hook's own top-level session_id; tool input/output later in the JSON may contain others
-sid=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-# Antigravity calls it conversationId; accept it directly so a missing jq remap can't drop the event
-[ -z "$sid" ] && sid=$(grep -o '"conversationId"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+
+event=""
+if [ "$agent" = agy ]; then
+    event=$(grep -Eo '(^|[,{[:space:]])"hookEventName"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+fi
+
+reply() {
+    if [ "$agent" = agy ]; then
+        case "${event:-$state}" in
+            PreToolUse|Stop|attention|done) printf '{"decision":"allow"}\n' ;;
+            *)                              printf '{}\n' ;;
+        esac
+    fi
+    exit 0
+}
+
+# Match only unescaped JSON keys so quoted text inside tool args or user input can't spoof an id.
+if [ "$agent" = agy ]; then
+    sid=$(grep -Eo '(^|[,{[:space:]])"conversationId"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    [ -z "$sid" ] && sid=$(grep -Eo '(^|[,{[:space:]])"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+else
+    sid=$(grep -Eo '(^|[,{[:space:]])"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    [ -z "$sid" ] && sid=$(grep -Eo '(^|[,{[:space:]])"conversationId"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+fi
+
 if [ -z "$sid" ]; then
     printf '%s lumen-hook: dropped "%s" from %s, no session id; payload: %s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-?}" "$(printf '%s' "$input" | head -c 300)" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$state" "${agent:-?}" "$(printf '%s' "$input" | head -c 300)" \
         >> "$HOME/.agent-lumen/lumen.log" 2>/dev/null
-    exit 0
+    reply
 fi
-[ -n "$2" ] && sid="$2-$sid"
+[ -n "$agent" ] && sid="$agent-$sid"
 sid=${sid//\//_}
 
-# ZCode reports no session end, so note its process and let the app see when that has gone. Its command line is
-# what identifies it: from a terminal it runs as "node .../zcode.cjs". The shell running this hook names zcode too.
+# Antigravity fires Stop on user cancellation and when pausing for background tasks/subagents:
+# cancelling returns to idle; unfinished background work stays orange instead of flashing green early.
+if [ "$agent" = agy ] && [ "$state" = done ]; then
+    if grep -Eq '(^|[,{[:space:]])"terminationReason"[[:space:]]*:[[:space:]]*"USER_CANCELED"' <<<"$input"; then
+        state=end
+    elif grep -Eq '(^|[,{[:space:]])"fullyIdle"[[:space:]]*:[[:space:]]*false([,}[:space:]]|$)' <<<"$input"; then
+        state=working
+    fi
+fi
+
+# Agents without SessionEnd: record the owning process while busy so a quit/crash clears the state at once.
+# Antigravity omits pid on 'done' so one-shot `agy -p` jobs keep their green light after the CLI exits.
 pid=""
-if [ "$2" = zcode ]; then
+if [ "$agent" = zcode ]; then
     p=$PPID
     while [ "${p:-0}" -gt 1 ]; do
         read -r ppid cmd <<<"$(ps -o ppid=,command= -p "$p" 2>/dev/null)"
@@ -34,16 +67,26 @@ if [ "$2" = zcode ]; then
         esac
         p=$ppid
     done
+elif [ "$agent" = agy ] && { [ "$state" = working ] || [ "$state" = attention ]; }; then
+    p=$PPID
+    while [ "${p:-0}" -gt 1 ]; do
+        read -r ppid cmd <<<"$(ps -o ppid=,command= -p "$p" 2>/dev/null)"
+        case "$cmd" in
+            *lumen-hook*) ;;
+            *Antigravity*|*antigravity*|*/agy\ *|*/agy|agy\ *|agy|*agy_acp*) pid=$p; break ;;
+        esac
+        p=$ppid
+    done
 fi
 
-case "$1" in
+case "$state" in
     working|done|attention)
         # write, then rename: the app polls this folder and must never read a half-written file
         tmp="$DIR/.$sid.$$"
-        printf '%s\n' "$1" $pid > "$tmp" && mv -f "$tmp" "$DIR/$sid" ;;
+        printf '%s\n' "$state" $pid > "$tmp" && mv -f "$tmp" "$DIR/$sid" ;;
     end) rm -f "$DIR/$sid" ;;
 esac
 
 # sessions closed without SessionEnd: forget them after a week
 find "$DIR" -type f -mmin +10080 -delete 2>/dev/null
-exit 0
+reply
