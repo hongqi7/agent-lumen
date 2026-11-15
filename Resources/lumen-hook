@@ -10,7 +10,14 @@ mkdir -p "$DIR"
 input=$(cat)
 # first match = the hook's own top-level session_id; tool input/output later in the JSON may contain others
 sid=$(grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-[ -z "$sid" ] && exit 0
+# Antigravity calls it conversationId; accept it directly so a missing jq remap can't drop the event
+[ -z "$sid" ] && sid=$(grep -o '"conversationId"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$input" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+if [ -z "$sid" ]; then
+    printf '%s lumen-hook: dropped "%s" from %s, no session id; payload: %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-?}" "$(printf '%s' "$input" | head -c 300)" \
+        >> "$HOME/.agent-lumen/lumen.log" 2>/dev/null
+    exit 0
+fi
 [ -n "$2" ] && sid="$2-$sid"
 sid=${sid//\//_}
 

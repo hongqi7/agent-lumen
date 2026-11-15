@@ -1,5 +1,5 @@
 // Agent Lumen (灵光): a menu bar light, a screen-edge glow and (optionally) NuPhy keyboard side lights
-// that show what your AI coding agents are doing — Claude Code, Codex, Gemini CLI, Qoder, WorkBuddy, Devin and ZCode.
+// that show what your AI coding agents are doing — Claude Code, Codex, Gemini CLI, Antigravity, Qoder, WorkBuddy, Devin and ZCode.
 // Blue: waiting for your approval. Orange: working. Green: done.
 // Each agent session reports its state through hooks (Resources/lumen-hook); this app is the only reader.
 import AppKit
@@ -15,6 +15,7 @@ let lumenSessions = lumenDir + "/sessions"
 let legacySessions = home + "/.claude/claude-light/sessions"
 let hookPath = lumenDir + "/lumen-hook"
 let staleSeconds: TimeInterval = 120 * 60   // a busy session silent for 2 hours was interrupted: count it as done
+let presenceGraceSeconds: TimeInterval = 45 // a fresh turn may not have its presence lock yet: don't flip it done too early
 // waiting for you can rightly last hours, but a prompt dismissed with Esc never reports again, so it can't stay blue for good
 let attentionStaleSeconds: TimeInterval = 24 * 60 * 60
 let loginLabel = "io.github.hongqi7.agent-lumen"
@@ -84,6 +85,15 @@ func readSessions(includeLegacy: Bool) -> [Session] {
                 continue
             }
             let target = targets.first { !$0.arg.isEmpty && name.hasPrefix($0.arg + "-") } ?? targets[0]
+            // a working/attention session whose conversation lock is gone will never see its end event:
+            // without this it would hold back the green until the long stale window expires
+            if light != .done, let pdir = target.presenceDir,
+               now.timeIntervalSince(mtime) > presenceGraceSeconds,
+               !fm.fileExists(atPath: pdir + "/" + name.dropFirst(target.arg.count + 1) + ".lock") {
+                try? "done\n".write(toFile: path, atomically: true, encoding: .utf8)
+                lumenLog("presence lock gone, counted done: \(name)")
+                light = .done
+            }
             if now.timeIntervalSince(mtime) > (light == .attention ? attentionStaleSeconds : staleSeconds) {
                 // an agent that never reports a session's end can't clear its last state: let it go in time
                 if !target.reportsEnd { continue }
@@ -135,7 +145,7 @@ func wave(_ t: CFTimeInterval, _ period: Double) -> CGFloat {
 
 // where command line agents usually live: an app started from Finder doesn't get the shell's PATH
 let commandDirs: [String] = {
-    var dirs = [home + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", home + "/.npm-global/bin",
+    var dirs = [home + "/.local/bin", home + "/.gemini/bin", "/opt/homebrew/bin", "/usr/local/bin", home + "/.npm-global/bin",
                 home + "/.bun/bin", home + "/.volta/bin", home + "/Library/pnpm"]
     let nvm = home + "/.nvm/versions/node"
     for version in (try? FileManager.default.contentsOfDirectory(atPath: nvm)) ?? [] { dirs.append("\(nvm)/\(version)/bin") }
@@ -152,11 +162,13 @@ struct AgentTarget {
     let events: [(event: String, state: String, matcher: String?)]
     var timeout = 5                          // in the unit this agent reads: seconds, milliseconds for Gemini CLI
     var nestedEvents = false                 // ZCode: { "hooks": { "enabled": true, "events": { ... } } }
+    var namedGroup: String? = nil            // Antigravity: top-level "<group>": { Event: [...] } instead of "hooks"
     // a folder alone doesn't prove these are installed: other tools create ~/.codex and ~/.gemini too
     var commands: [String] = []
     var apps: [String] = []
     var folderMeansInstalled = true
     var needsTrust = false                   // the agent skips new hooks until the user approves them there
+    var presenceDir: String? = nil           // Antigravity: one "<sid>.lock" per open conversation; gone means the turn can't report Stop
     var note: String? = nil
 
     enum Status { case absent, off, lumen, legacy, broken }
@@ -204,6 +216,12 @@ let targets = [
                 events: [("BeforeAgent", "working", nil), ("AfterTool", "working", nil),
                          ("Notification", "attention", nil), ("AfterAgent", "done", nil), ("SessionEnd", "end", nil)],
                 timeout: 5000, commands: ["gemini"], folderMeansInstalled: false),
+    // Antigravity shares ~/.gemini with Gemini CLI, so hooks live in config/hooks.json as named groups; stdin uses conversationId
+    AgentTarget(name: "Antigravity", configDir: home + "/.gemini", settings: home + "/.gemini/config/hooks.json", arg: "agy",
+                events: [("SessionStart", "working", nil), ("PreInvocation", "working", nil),
+                         ("PostToolUse", "working", "*"), ("Stop", "done", nil)],
+                namedGroup: "agent-lumen", commands: ["agy"], apps: ["Antigravity"], folderMeansInstalled: false,
+                presenceDir: home + "/.gemini/antigravity/presence"),
     AgentTarget(name: "Qoder", configDir: home + "/.qoder", settings: home + "/.qoder/settings.json", arg: "qoder",
                 events: [("UserPromptSubmit", "working", nil), ("PostToolUse", "working", nil),
                          ("PermissionRequest", "attention", nil), ("Notification", "attention", "permission_prompt"),
@@ -304,21 +322,21 @@ func topLevelValueRange(_ b: [UInt8], key: String) -> Range<Int>? {
     return nil
 }
 
-// The new file contents. A settings file stays the user's: only the value of "hooks" is replaced, so the key order,
+// The new file contents. A settings file stays the user's: only the value of `key` is replaced, so the key order,
 // formatting and comments everywhere else survive. Falls back to writing the whole file if that can't be done safely.
-func renderSettings(original: Data?, root: [String: Any]) throws -> Data {
+func renderSettings(original: Data?, root: [String: Any], key: String = "hooks") throws -> Data {
     let options: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     let whole = try JSONSerialization.data(withJSONObject: root, options: options)
-    guard let original, !original.isEmpty, let hooks = root["hooks"] else { return whole }
-    let value = String(decoding: try JSONSerialization.data(withJSONObject: hooks, options: options), as: UTF8.self)
+    guard let original, !original.isEmpty, let section = root[key] else { return whole }
+    let value = String(decoding: try JSONSerialization.data(withJSONObject: section, options: options), as: UTF8.self)
         .replacingOccurrences(of: "\n", with: "\n  ")   // one level in; a JSON string can't hold a raw line break
     let b = blankComments(original)
     var out = [UInt8](original)
-    if let range = topLevelValueRange(b, key: "hooks") {
+    if let range = topLevelValueRange(b, key: key) {
         out.replaceSubrange(range, with: Array(value.utf8))
     } else if let close = b.lastIndex(of: 0x7D), let last = b[..<close].lastIndex(where: { !isJSONSpace($0) }) {
         let lineBreak = b[(last + 1)..<close].contains(0x0A) ? "" : "\n"
-        let text = (b[last] == 0x7B ? "" : ",") + "\n  \"hooks\": " + value + lineBreak
+        let text = (b[last] == 0x7B ? "" : ",") + "\n  \"\(key)\": " + value + lineBreak
         out.insert(contentsOf: Array(text.utf8), at: last + 1)
     } else {
         return whole
@@ -339,30 +357,58 @@ func backUpSettings(_ realFile: String, settings: String, keepNewest: Int = 4) {
     for name in backups[1..<(backups.count - keepNewest)] { try? fm.removeItem(atPath: dir + "/" + name) }
 }
 
+private func isLumenCommand(_ command: String) -> Bool {
+    ["lumen-hook", "claude-light"].contains(where: command.contains)
+}
+
 private func isLumenEntry(_ entry: Any) -> Bool {
-    ((entry as? [String: Any])?["hooks"] as? [[String: Any]] ?? [])
-        .contains { c in ["lumen-hook", "claude-light"].contains { (c["command"] as? String ?? "").contains($0) } }
+    guard let dict = entry as? [String: Any] else { return false }
+    if let cmd = dict["command"] as? String, isLumenCommand(cmd) { return true }
+    return (dict["hooks"] as? [[String: Any]] ?? []).contains { isLumenCommand($0["command"] as? String ?? "") }
 }
 
 private func hookCommand(_ t: AgentTarget, state: String) -> String {
-    "\"\(hookPath)\" \(state) \(t.arg)".trimmingCharacters(in: .whitespaces)
+    if t.namedGroup != nil {
+        let hook = "'" + hookPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "/usr/bin/jq -c '{session_id:(.conversationId//.session_id//\"\")}' 2>/dev/null | \(hook) \(state) \(t.arg); printf '{}\\n'"
+    }
+    return "\"\(hookPath)\" \(state) \(t.arg)".trimmingCharacters(in: .whitespaces)
 }
 
 // whether a connected agent's hooks differ from what this version of the app would write
 func hooksOutdated(_ t: AgentTarget) -> Bool {
     guard let data = FileManager.default.contents(atPath: t.settings), let root = parseSettings(data) else { return false }
-    let container = root["hooks"] as? [String: Any] ?? [:]
-    let hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
+    let hooks: [String: Any]
+    if let group = t.namedGroup {
+        let g = root[group] as? [String: Any] ?? [:]
+        if g["enabled"] as? Bool == false { return true }
+        for (name, val) in root where name != group {
+            for value in (val as? [String: Any] ?? [:]).values {
+                if (value as? [Any] ?? []).contains(where: isLumenEntry) { return true }
+            }
+        }
+        hooks = g
+    } else {
+        let container = root["hooks"] as? [String: Any] ?? [:]
+        hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
+    }
     var found: [String] = []
     for (event, value) in hooks {
         for entry in value as? [Any] ?? [] where isLumenEntry(entry) {
             let e = entry as? [String: Any] ?? [:]
-            for c in e["hooks"] as? [[String: Any]] ?? [] {
-                found.append("\(event)|\(e["matcher"] as? String ?? "")|\(c["command"] as? String ?? "")")
+            if let sub = e["hooks"] as? [[String: Any]] {
+                for c in sub {
+                    found.append("\(event)|\(e["matcher"] as? String ?? "")|\(c["command"] as? String ?? "")")
+                }
+            } else if let cmd = e["command"] as? String {
+                found.append("\(event)|\(t.namedGroup != nil ? "flat" : "")|\(cmd)")
             }
         }
     }
-    let wanted = t.events.map { "\($0.event)|\($0.matcher ?? "")|\(hookCommand(t, state: $0.state))" }
+    let wanted = t.events.map { e -> String in
+        let m = e.matcher ?? (t.namedGroup != nil ? "flat" : "")
+        return "\(e.event)|\(m)|\(hookCommand(t, state: e.state))"
+    }
     return found.sorted() != wanted.sorted()
 }
 
@@ -381,31 +427,66 @@ func setHooks(_ t: AgentTarget, install: Bool) throws {
         perms = try? fm.attributesOfItem(atPath: path)[.posixPermissions]
         backUpSettings(path, settings: t.settings)
     }
-    var container = root["hooks"] as? [String: Any] ?? [:]
-    var hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
-    // only event lists: "hooks" can also hold an agent's own settings, such as "enabled"
-    for event in Array(hooks.keys) {
-        guard let list = hooks[event] as? [Any] else { continue }
-        let kept = list.filter { !isLumenEntry($0) }
-        hooks[event] = kept.isEmpty ? nil : kept
-    }
-    if install {
-        for e in t.events {
-            var entry: [String: Any] = ["hooks": [["type": "command",
-                                                   "command": hookCommand(t, state: e.state),
-                                                   "timeout": t.timeout]]]
-            if let m = e.matcher { entry["matcher"] = m }
-            hooks[e.event] = [entry] + (hooks[e.event] as? [Any] ?? [])
+    let sectionKey: String
+    if let group = t.namedGroup {
+        sectionKey = group
+        // clean lumen entries from every named group, leaving other groups (e.g. agent-hud) untouched
+        for name in Array(root.keys) {
+            guard var g = root[name] as? [String: Any] else { continue }
+            var changed = false
+            for event in Array(g.keys) {
+                guard let list = g[event] as? [Any] else { continue }
+                let kept = list.filter { !isLumenEntry($0) }
+                if kept.count != list.count {
+                    g[event] = kept.isEmpty ? nil : kept
+                    changed = true
+                }
+            }
+            if changed || name == group {
+                let hasEvents = g.values.contains { $0 is [Any] }
+                root[name] = hasEvents ? g : nil
+            }
         }
-    }
-    if t.nestedEvents {
-        container["events"] = hooks
-        if install { container["enabled"] = true }
+        if install {
+            var hooks = root[group] as? [String: Any] ?? [:]
+            if hooks["enabled"] as? Bool == false { hooks.removeValue(forKey: "enabled") }
+            for e in t.events {
+                let handler: [String: Any] = ["type": "command",
+                                              "command": hookCommand(t, state: e.state),
+                                              "timeout": t.timeout]
+                let entry: [String: Any] = e.matcher.map { ["matcher": $0, "hooks": [handler]] } ?? handler
+                hooks[e.event] = [entry] + (hooks[e.event] as? [Any] ?? [])
+            }
+            root[group] = hooks
+        }
     } else {
-        container = hooks
+        sectionKey = "hooks"
+        var container = root["hooks"] as? [String: Any] ?? [:]
+        var hooks = t.nestedEvents ? container["events"] as? [String: Any] ?? [:] : container
+        // only event lists: "hooks" can also hold an agent's own settings, such as "enabled"
+        for event in Array(hooks.keys) {
+            guard let list = hooks[event] as? [Any] else { continue }
+            let kept = list.filter { !isLumenEntry($0) }
+            hooks[event] = kept.isEmpty ? nil : kept
+        }
+        if install {
+            for e in t.events {
+                var entry: [String: Any] = ["hooks": [["type": "command",
+                                                       "command": hookCommand(t, state: e.state),
+                                                       "timeout": t.timeout]]]
+                if let m = e.matcher { entry["matcher"] = m }
+                hooks[e.event] = [entry] + (hooks[e.event] as? [Any] ?? [])
+            }
+        }
+        if t.nestedEvents {
+            container["events"] = hooks
+            if install { container["enabled"] = true }
+        } else {
+            container = hooks
+        }
+        root["hooks"] = container
     }
-    root["hooks"] = container
-    let data = try renderSettings(original: original, root: root)
+    let data = try renderSettings(original: original, root: root, key: sectionKey)
     try fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     try data.write(to: URL(fileURLWithPath: path), options: .atomic)
     if let perms { try? fm.setAttributes([.posixPermissions: perms], ofItemAtPath: path) }
@@ -2123,12 +2204,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 }
 
-// command line: AgentLumen --connect | --disconnect   wires every installed agent without opening the app
+// command line: AgentLumen --connect | --disconnect [agent...]   wires installed agents without opening the app
 let args = CommandLine.arguments
 if args.contains("--connect") || args.contains("--disconnect") {
     let install = args.contains("--connect")
+    let only = Set(args.dropFirst().filter { !$0.hasPrefix("-") })
     if install { try? installHookScript() }
-    for t in targets {
+    for t in targets where only.isEmpty || only.contains(t.arg) || only.contains(t.name) {
         let s = t.status
         guard s != .absent, install || s == .lumen else {
             print("\(t.name): \(s == .absent ? "not installed" : "not connected")")
